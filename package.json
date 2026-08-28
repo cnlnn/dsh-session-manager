@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-session-manager",
-  "version": "0.2.10",
+  "version": "0.2.13",
   "private": true,
   "description": "Session trash and recovery for DeepSeek Harness",
   "type": "module",
