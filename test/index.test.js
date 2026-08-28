@@ -216,6 +216,7 @@ test('reconciles DSH client state without reloading the page', async () => {
   assert.match(client, /sidebar\.footer\.action/)
   assert.match(client, /IconDownloadOutline16/)
   assert.match(client, /IconRefreshOutline16/)
+  assert.match(client, /dsm-icon-button\.dsm-danger/)
   assert.match(client, /已归档/)
   assert.match(client, /空会话/)
   assert.match(client, /空闲/)
