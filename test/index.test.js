@@ -151,3 +151,12 @@ test('permanently removes a trashed payload', async () => {
   assert.equal((await f.manager.list()).trash.length, 0)
   await assert.rejects(stat(f.artifact), /ENOENT/)
 })
+
+test('reconciles DSH client state without reloading the page', async () => {
+  const client = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+
+  assert.doesNotMatch(client, /location\.reload/)
+  assert.match(client, /ctx\.sessions\.refresh\(\)/)
+  assert.match(client, /ctx\.workspaces\.refresh\(\)/)
+  assert.match(client, /const inject = \["slots", "sessions", "workspaces"\]/)
+})
