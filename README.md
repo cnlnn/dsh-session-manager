@@ -9,12 +9,14 @@ This is a community integration and is not an official DeepSeek plugin.
 ## Highlights
 
 - Native `Settings → Session Manager` page in DSH
-- Sidebar Trash entry with the pending-session count
+- Optional sidebar Trash entry with the pending-session count
 - Move to Trash and Delete Permanently actions in each session's ellipsis menu
-- Session title, workspace, creation time, storage use, running or idle state, archive state, and blank-session state
+- Search by title, path, or session ID; filter by state; sort by time, title, or storage use
+- Session title, workspace, creation time, storage use, running or idle state, archive state, blank-session state, and unassigned state
 - Protection for running sessions; attached idle sessions can be handled directly
 - Confirmation before removal
 - Restore, permanent deletion, and Empty Trash actions
+- Trash directories on a different disk or filesystem
 - Linux, macOS, and native Windows support
 
 ## Data Handling
@@ -56,6 +58,8 @@ The same commands work with a pinned `npx @deepseek-ai/dsh` launcher when DSH is
 ## Use
 
 Each Workspace session's ellipsis menu offers Move to Trash and Delete Permanently. The Trash entry at the bottom of the sidebar opens restore, permanent-delete, and empty-trash controls. The complete inventory remains available under `Settings → Session Manager`.
+
+`Settings → Plugins → Plugin Configuration → Session Manager` includes a Show Trash Below Workspaces option. It controls only the sidebar entry and does not change stored trash content. All feature settings are available in the UI; editing `settings.yaml` is not required.
 
 Wait for a running session to become idle before removing it. An attached idle session can be moved to Trash or deleted permanently without switching away first. Session lists reconcile in place after move, restore, and delete operations without reloading the page.
 

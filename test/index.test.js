@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, test } from 'node:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
-import { SessionTrashManager } from '../index.js'
+import { moveDirectory, SessionTrashManager } from '../index.js'
 
 const roots = []
 
@@ -99,13 +99,19 @@ async function fixture({ live = false, running = false, archived = false, blank 
       ? projectionCache
       : service === 'workspaceRegistry' ? registry : undefined,
   }
+  let showSidebarTrash = true
+  const managerConfig = {
+    trashDirectory,
+    get showSidebarTrash() { return showSidebarTrash },
+  }
   return {
     root,
     id,
     artifact,
     sessionDirectory,
     trashDirectory,
-    manager: new SessionTrashManager(ctx, { trashDirectory }),
+    manager: new SessionTrashManager(ctx, managerConfig),
+    setShowSidebarTrash(value) { showSidebarTrash = value },
     disposed: () => disposed,
     projectionDeleted: () => projectionDeleted,
     projectionRebuilt: () => projectionRebuilt,
@@ -120,6 +126,7 @@ test('moves a cold persisted session to trash and restores it', async () => {
   const moved = await f.manager.trash(f.id)
   await assert.rejects(stat(f.sessionDirectory), /ENOENT/)
   assert.equal((await f.manager.list()).sessions.length, 0)
+  assert.equal((await f.manager.list()).showSidebarTrash, true)
   const trashed = (await f.manager.list()).trash
   assert.equal(trashed.length, 1)
   assert.equal(trashed[0].title, 'Release validation')
@@ -135,6 +142,42 @@ test('moves a cold persisted session to trash and restores it', async () => {
   assert.deepEqual(f.workspaceSessions, [f.id])
   assert.deepEqual(f.registry.archivedSessionIds, [f.id])
   assert.equal(f.projectionRebuilt(), true)
+})
+
+test('moves a directory across filesystems through a staged copy', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-session-manager-exdev-'))
+  roots.push(root)
+  const source = join(root, 'source')
+  const target = join(root, 'target')
+  await mkdir(source)
+  await writeFile(join(source, 'session.jsonl.zstd'), 'cross-volume bytes')
+  let firstRename = true
+
+  const fs = await import('node:fs/promises')
+  await moveDirectory(source, target, {
+    async rename(from, to) {
+      if (firstRename) {
+        firstRename = false
+        const error = new Error('cross-device link not permitted')
+        error.code = 'EXDEV'
+        throw error
+      }
+      await fs.rename(from, to)
+    },
+    cp: fs.cp,
+    rm: fs.rm,
+  })
+
+  assert.equal(await readFile(join(target, 'session.jsonl.zstd'), 'utf8'), 'cross-volume bytes')
+  await assert.rejects(stat(source), /ENOENT/)
+})
+
+test('applies sidebar trash visibility changes without touching trash data', async () => {
+  const f = await fixture()
+  assert.equal((await f.manager.list()).showSidebarTrash, true)
+  f.setShowSidebarTrash(false)
+  assert.equal((await f.manager.list()).showSidebarTrash, false)
+  assert.equal((await f.manager.list()).sessions.length, 1)
 })
 
 test('closes and moves an attached idle session', async () => {
@@ -212,14 +255,18 @@ test('reconciles DSH client state without reloading the page', async () => {
   assert.doesNotMatch(client, /location\.reload/)
   assert.match(client, /ctx\.sessions\.refresh\(\)/)
   assert.match(client, /ctx\.workspaces\.refresh\(\)/)
-  assert.match(client, /const inject = \["slots", "sessions", "workspaces"\]/)
+  assert.match(client, /const inject = \["slots", "sessions", "workspaces", "connection"\]/)
   assert.match(client, /sidebar\.footer\.action/)
+  assert.match(client, /settings\.plugin\.item/)
+  assert.match(client, /工作区下方显示回收站/)
   assert.match(client, /dsm-move-icon-source/)
   assert.match(client, /dsm-undo-icon/)
   assert.match(client, /dsm-icon-button\.dsm-danger/)
   assert.match(client, /已归档/)
   assert.match(client, /空会话/)
   assert.match(client, /空闲/)
+  assert.match(client, /搜索标题、路径或会话 ID/)
+  assert.match(client, /未加入工作区/)
   assert.doesNotMatch(client, />已打开</)
   assert.match(client, /永久删除会话/)
   assert.match(client, /清空回收站/)

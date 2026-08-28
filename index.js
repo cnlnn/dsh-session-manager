@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import {
   access,
+  cp,
   lstat,
   mkdir,
   readFile,
@@ -15,6 +16,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { symbols } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 
 export const name = 'session-manager'
 export const inject = ['apiProxy', 'sessionPersistence', 'sessions', 'webServer']
@@ -23,9 +25,11 @@ const API_ROOT = '/plugins/@local/dsh-session-manager/api'
 const MANIFEST_NAME = 'manifest.json'
 const PAYLOAD_NAME = 'session'
 const MAX_BODY_BYTES = 16 * 1024
+export const SETTINGS_NAMESPACE = settingsNamespace('session-manager')
 
 export const Config = z.object({
   trashDirectory: z.string().default(join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'trash')),
+  showSidebarTrash: z.boolean().default(true).description('工作区下方显示回收站'),
 })
 
 function json(res, status, value) {
@@ -78,6 +82,37 @@ function requireString(record, key) {
     throw new Error(`${key} must be a non-empty string`)
   }
   return value
+}
+
+/** Move a directory without assuming the trash directory is on the same filesystem. */
+export async function moveDirectory(source, target, operations = { rename, cp, rm }) {
+  try {
+    await operations.rename(source, target)
+    return
+  } catch (error) {
+    if (error?.code !== 'EXDEV') throw error
+  }
+
+  const temporary = `${target}.copy-${randomUUID()}`
+  try {
+    await operations.cp(source, temporary, {
+      recursive: true,
+      force: false,
+      errorOnExist: true,
+      preserveTimestamps: true,
+    })
+    await operations.rename(temporary, target)
+  } catch (error) {
+    await operations.rm(temporary, { recursive: true, force: true }).catch(() => {})
+    throw error
+  }
+
+  try {
+    await operations.rm(source, { recursive: true })
+  } catch (error) {
+    error.preserveDestination = true
+    throw error
+  }
 }
 
 function projectionFor(ctx, meta) {
@@ -284,6 +319,7 @@ export class SessionTrashManager {
   constructor(ctx, config) {
     this.ctx = ctx
     this.trashDirectory = resolve(config.trashDirectory)
+    this.showSidebarTrash = () => config.showSidebarTrash ?? true
     this.reservations = new Map()
   }
 
@@ -300,6 +336,7 @@ export class SessionTrashManager {
         cwd: meta.cwd,
         createdAt: meta.createdAt,
         archived: metadata.archived,
+        workspaceIds: metadata.workspaceIds,
         attached: state.attached,
         blank: snapshot?.values?.sessionListMetadata?.blank === true,
         running: state.running,
@@ -307,7 +344,11 @@ export class SessionTrashManager {
       }
     }))
     sessions.sort((a, b) => timestampOf(b.createdAt) - timestampOf(a.createdAt))
-    return { sessions, trash: await listTrash(this.trashDirectory) }
+    return {
+      sessions,
+      trash: await listTrash(this.trashDirectory),
+      showSidebarTrash: this.showSidebarTrash(),
+    }
   }
 
   async trash(sessionId) {
@@ -353,7 +394,7 @@ export class SessionTrashManager {
         flag: 'wx',
         mode: 0o600,
       })
-      await rename(sessionDirectory, join(entryDirectory, PAYLOAD_NAME))
+      await moveDirectory(sessionDirectory, join(entryDirectory, PAYLOAD_NAME))
       await cleanDerivedMetadata(this.ctx, sessionId, metadata, false).catch(error => {
         this.ctx.logger?.warn(`session-manager: moved "${sessionId}" but could not remove all derived metadata: ${errorMessage(error)}`)
       })
@@ -361,7 +402,7 @@ export class SessionTrashManager {
       return manifest
     } catch (error) {
       preparation[Symbol.dispose]()
-      if (entryDirectory !== undefined) {
+      if (entryDirectory !== undefined && error?.preserveDestination !== true) {
         await rm(entryDirectory, { recursive: true, force: true }).catch(() => {})
       }
       throw error
@@ -410,7 +451,7 @@ export class SessionTrashManager {
       () => { throw new Error('the original session directory already exists') },
       error => { if (error?.code !== 'ENOENT') throw error },
     )
-    await rename(join(entryDirectory, PAYLOAD_NAME), manifest.originalDirectory)
+    await moveDirectory(join(entryDirectory, PAYLOAD_NAME), manifest.originalDirectory)
     await this.ctx.get('sessionProjectionCache')?.coldSnapshot(manifest.sessionId).catch(error => {
       this.ctx.logger?.warn(`session-manager: restored "${manifest.sessionId}" but could not rebuild its title metadata: ${errorMessage(error)}`)
     })
@@ -479,7 +520,21 @@ function registerRoute(ctx, route, handler) {
 }
 
 export function apply(ctx, config) {
-  const manager = new SessionTrashManager(ctx, config)
+  let settingsSource = () => ({ showSidebarTrash: config.showSidebarTrash ?? true })
+  const manager = new SessionTrashManager(ctx, {
+    ...config,
+    get showSidebarTrash() { return settingsSource().showSidebarTrash },
+  })
+  installSettingsSection(
+    ctx,
+    SETTINGS_NAMESPACE,
+    z.object({ showSidebarTrash: z.boolean().default(true).description('工作区下方显示回收站') }),
+    { showSidebarTrash: config.showSidebarTrash ?? true },
+    {
+      setSource(source) { settingsSource = source },
+      onChange() {},
+    },
+  )
   ctx.effect(() => {
     const disposers = [
       registerRoute(ctx, 'sessions', () => manager.list()),
