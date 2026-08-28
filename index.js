@@ -13,10 +13,11 @@ import {
 } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { symbols } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 
 export const name = 'session-manager'
-export const inject = ['sessionPersistence', 'sessions', 'webServer']
+export const inject = ['apiProxy', 'sessionPersistence', 'sessions', 'webServer']
 
 const API_ROOT = '/plugins/@local/dsh-session-manager/api'
 const MANIFEST_NAME = 'manifest.json'
@@ -97,8 +98,36 @@ function titleFor(ctx, meta) {
 
 function sessionState(ctx, sessionId) {
   const attached = ctx.sessions.get(sessionId) !== undefined
-  const running = ctx.get('agents')?.get(sessionId)?.status === 'running'
-  return { attached, running }
+  const agent = ctx.get('agents')?.get(sessionId)
+  const running = agent?.status === 'running'
+  return { agent, attached, running }
+}
+
+async function closeIdleSession(ctx, sessionId, action) {
+  const state = sessionState(ctx, sessionId)
+  if (!state.attached) return
+  if (state.running) throw new Error(`运行中的会话不能${action}，请等待任务结束`)
+  if (state.agent?.status !== 'idle') {
+    throw new Error(`无法确认会话已空闲，不能${action}`)
+  }
+
+  // ApiProxy owns browser-opened Agent handles but does not expose a close RPC.
+  // Dispose its exact per-session Cordis effect so normal persistence teardown runs.
+  const tracedApiProxy = ctx.get('apiProxy')
+  const apiProxy = tracedApiProxy?.[symbols.original] ?? tracedApiProxy
+  const disposables = apiProxy?.ctx?.fiber?._disposables
+  const label = `agentLoop.lifecycle(${sessionId})`
+  const lifecycles = disposables === undefined
+    ? []
+    : [...disposables].filter(dispose => dispose?.[symbols.effect]?.label === label)
+  if (lifecycles.length !== 1) {
+    throw new Error(`无法安全关闭空闲会话，不能${action}`)
+  }
+  await lifecycles[0]()
+  const remaining = sessionState(ctx, sessionId)
+  if (remaining.attached || remaining.agent !== undefined) {
+    throw new Error(`空闲会话关闭失败，不能${action}`)
+  }
 }
 
 async function fileSize(location) {
@@ -212,7 +241,11 @@ function workspaceMetadata(ctx, sessionId) {
   }
 }
 
-async function cleanDerivedMetadata(ctx, sessionId, metadata) {
+async function removeProjectionMetadata(ctx, sessionId) {
+  await ctx.get('sessionProjectionCache')?.table?.delete(sessionId)
+}
+
+async function cleanDerivedMetadata(ctx, sessionId, metadata, removeProjection) {
   const registry = ctx.get('workspaceRegistry')
   if (registry !== undefined) {
     for (const workspaceId of metadata.workspaceIds) {
@@ -228,8 +261,7 @@ async function cleanDerivedMetadata(ctx, sessionId, metadata) {
     registry.sessionPaths?.delete(sessionId)
     registry.invalidSessionPaths?.delete(sessionId)
   }
-  const projectionCache = ctx.get('sessionProjectionCache')
-  await projectionCache?.table?.delete(sessionId)
+  if (removeProjection) await removeProjectionMetadata(ctx, sessionId)
 }
 
 async function restoreWorkspaceMetadata(ctx, manifest) {
@@ -272,9 +304,7 @@ export class SessionTrashManager {
     if (initialState.running) {
       throw new Error('运行中的会话不能删除，请等待任务结束')
     }
-    if (initialState.attached) {
-      throw new Error('已打开的会话不能删除，请先切换到其他会话')
-    }
+    await closeIdleSession(this.ctx, sessionId, '移动到回收站')
     const meta = await requireStoredSession(this.ctx, sessionId)
     const preparation = await this.ctx.sessionPersistence.prepare(meta.id)
     let entryDirectory
@@ -313,7 +343,7 @@ export class SessionTrashManager {
         mode: 0o600,
       })
       await rename(sessionDirectory, join(entryDirectory, PAYLOAD_NAME))
-      await cleanDerivedMetadata(this.ctx, sessionId, metadata).catch(error => {
+      await cleanDerivedMetadata(this.ctx, sessionId, metadata, false).catch(error => {
         this.ctx.logger?.warn(`session-manager: moved "${sessionId}" but could not remove all derived metadata: ${errorMessage(error)}`)
       })
       this.reservations.set(sessionId, preparation)
@@ -332,9 +362,7 @@ export class SessionTrashManager {
     if (initialState.running) {
       throw new Error('运行中的会话不能永久删除，请等待任务结束')
     }
-    if (initialState.attached) {
-      throw new Error('已打开的会话不能永久删除，请先切换到其他会话')
-    }
+    await closeIdleSession(this.ctx, sessionId, '永久删除')
     const meta = await requireStoredSession(this.ctx, sessionId)
     const preparation = await this.ctx.sessionPersistence.prepare(meta.id)
     try {
@@ -352,7 +380,7 @@ export class SessionTrashManager {
       if (!sessionInfo.isDirectory() || sessionInfo.isSymbolicLink()) throw new Error('invalid session directory')
       const title = titleFor(this.ctx, preparedMeta)
       await rm(sessionDirectory, { recursive: true })
-      await cleanDerivedMetadata(this.ctx, sessionId, metadata).catch(error => {
+      await cleanDerivedMetadata(this.ctx, sessionId, metadata, true).catch(error => {
         this.ctx.logger?.warn(`session-manager: deleted "${sessionId}" but could not remove all derived metadata: ${errorMessage(error)}`)
       })
       return { sessionId, title }
@@ -372,6 +400,9 @@ export class SessionTrashManager {
       error => { if (error?.code !== 'ENOENT') throw error },
     )
     await rename(join(entryDirectory, PAYLOAD_NAME), manifest.originalDirectory)
+    await this.ctx.get('sessionProjectionCache')?.coldSnapshot(manifest.sessionId).catch(error => {
+      this.ctx.logger?.warn(`session-manager: restored "${manifest.sessionId}" but could not rebuild its title metadata: ${errorMessage(error)}`)
+    })
     await restoreWorkspaceMetadata(this.ctx, manifest).catch(error => {
       this.ctx.logger?.warn(`session-manager: restored "${manifest.sessionId}" but could not restore all workspace metadata: ${errorMessage(error)}`)
     })
@@ -385,6 +416,9 @@ export class SessionTrashManager {
   async purge(trashId) {
     const { entryDirectory, manifest } = await findTrashEntry(this.trashDirectory, trashId)
     await rm(entryDirectory, { recursive: true })
+    await removeProjectionMetadata(this.ctx, manifest.sessionId).catch(error => {
+      this.ctx.logger?.warn(`session-manager: purged "${manifest.sessionId}" but could not remove its title metadata: ${errorMessage(error)}`)
+    })
     this.releaseReservation(manifest.sessionId)
     return manifest
   }

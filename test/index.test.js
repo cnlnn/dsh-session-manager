@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, test } from 'node:test'
 import { mkdtemp, rm } from 'node:fs/promises'
+import { Context } from '@deepseek-ai/cordis'
 import { SessionTrashManager } from '../index.js'
 
 const roots = []
@@ -31,9 +32,17 @@ async function fixture({ live = false, running = false, archived = false } = {})
   }
   let disposed = false
   let projectionDeleted = false
+  let projectionRebuilt = false
   const workspaceId = 'workspace-1'
   const workspaceSessions = [id]
   const liveSessions = new Map(live ? [[id, { id }]] : [])
+  let agentAttached = live
+  const closeLifecycle = async () => {
+    agentAttached = false
+    liveSessions.delete(id)
+  }
+  closeLifecycle[Context.effect] = { label: `agentLoop.lifecycle(${id})`, children: [] }
+  const apiProxy = { ctx: { fiber: { _disposables: new Set([closeLifecycle]) } } }
   const persistence = {
     locate: header => ({ kind: 'jsonl', path: join(root, 'sessions', 'workspace-key', header.id, 'session.jsonl.zstd') }),
     list: async () => {
@@ -77,13 +86,15 @@ async function fixture({ live = false, running = false, archived = false } = {})
   }
   const projectionCache = {
     cachedSnapshot: () => ({ values: { title: 'Release validation' } }),
+    async coldSnapshot() { projectionRebuilt = true },
     table: { async delete() { projectionDeleted = true } },
   }
   const ctx = {
     sessionPersistence: persistence,
     sessions: { get: sessionId => liveSessions.get(sessionId) },
     get: service => service === 'agents'
-      ? { get: sessionId => sessionId === id && running ? { status: 'running' } : undefined }
+      ? { get: sessionId => sessionId === id && agentAttached ? { status: running ? 'running' : 'idle' } : undefined }
+      : service === 'apiProxy' ? apiProxy
       : service === 'sessionProjectionCache'
       ? projectionCache
       : service === 'workspaceRegistry' ? registry : undefined,
@@ -97,6 +108,7 @@ async function fixture({ live = false, running = false, archived = false } = {})
     manager: new SessionTrashManager(ctx, { trashDirectory }),
     disposed: () => disposed,
     projectionDeleted: () => projectionDeleted,
+    projectionRebuilt: () => projectionRebuilt,
     workspaceSessions,
     registry,
   }
@@ -114,7 +126,7 @@ test('moves a cold persisted session to trash and restores it', async () => {
   assert.equal(f.disposed(), false)
   assert.deepEqual(f.workspaceSessions, [])
   assert.deepEqual(f.registry.archivedSessionIds, [])
-  assert.equal(f.projectionDeleted(), true)
+  assert.equal(f.projectionDeleted(), false)
 
   await f.manager.restore(moved.trashId)
   assert.equal(await readFile(f.artifact, 'utf8'), 'durable session bytes')
@@ -122,12 +134,13 @@ test('moves a cold persisted session to trash and restores it', async () => {
   assert.equal(f.disposed(), true)
   assert.deepEqual(f.workspaceSessions, [f.id])
   assert.deepEqual(f.registry.archivedSessionIds, [f.id])
+  assert.equal(f.projectionRebuilt(), true)
 })
 
-test('refuses to move a live session', async () => {
+test('closes and moves an attached idle session', async () => {
   const f = await fixture({ live: true })
-  await assert.rejects(f.manager.trash(f.id), /已打开的会话不能删除/)
-  assert.equal(await readFile(f.artifact, 'utf8'), 'durable session bytes')
+  await f.manager.trash(f.id)
+  await assert.rejects(stat(f.artifact), /ENOENT/)
 })
 
 test('reports running separately from an attached idle session', async () => {
@@ -151,6 +164,7 @@ test('permanently removes a trashed payload', async () => {
   await f.manager.purge(moved.trashId)
   assert.equal((await f.manager.list()).trash.length, 0)
   assert.equal(f.disposed(), true)
+  assert.equal(f.projectionDeleted(), true)
   await assert.rejects(stat(f.artifact), /ENOENT/)
 })
 
@@ -167,11 +181,11 @@ test('permanently deletes a cold session without using trash', async () => {
   await assert.rejects(stat(f.sessionDirectory), /ENOENT/)
 })
 
-test('refuses to permanently delete an attached session', async () => {
+test('closes and permanently deletes an attached idle session', async () => {
   const f = await fixture({ live: true })
 
-  await assert.rejects(f.manager.deleteForever(f.id), /已打开的会话不能永久删除/)
-  assert.equal(await readFile(f.artifact, 'utf8'), 'durable session bytes')
+  await f.manager.deleteForever(f.id)
+  await assert.rejects(stat(f.artifact), /ENOENT/)
 })
 
 test('empties all valid trash entries', async () => {

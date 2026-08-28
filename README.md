@@ -12,14 +12,14 @@ This is a community integration and is not an official DeepSeek plugin.
 - Sidebar Trash entry with the pending-session count
 - Move to Trash and Delete Permanently actions in each session's ellipsis menu
 - Session title, workspace, creation time, and storage use
-- Protection for running and attached sessions
+- Protection for running sessions; attached idle sessions can be handled directly
 - Confirmation before removal
 - Restore, permanent deletion, and Empty Trash actions
 - Linux, macOS, and native Windows support
 
 ## Data Handling
 
-Moving a session to trash reserves it through the DSH persistence service, moves its directory to `$DSH_HOME/trash`, and removes its Workspace account, archive state, and projection cache. The plugin does not read or upload conversation content.
+Moving a session to trash first closes it when it is attached and idle, reserves it through the DSH persistence service, moves its directory to `$DSH_HOME/trash`, and updates its Workspace and archive records. Title projections are preserved and rebuilt during restore, so the original title appears immediately. The plugin does not upload conversation content.
 
 Restore moves the directory back to its original location. Permanent deletion can remove a cold session directly or remove one or every entry from Trash; a directly deleted session never enters Trash.
 
@@ -57,7 +57,7 @@ The same commands work with a pinned `npx @deepseek-ai/dsh` launcher when DSH is
 
 Each Workspace session's ellipsis menu offers Move to Trash and Delete Permanently. The Trash entry at the bottom of the sidebar opens restore, permanent-delete, and empty-trash controls. The complete inventory remains available under `Settings → Session Manager`.
 
-Switch away from an attached or running session before removing it. Session lists reconcile in place after move, restore, and delete operations without reloading the page.
+Wait for a running session to become idle before removing it. An attached idle session can be moved to Trash or deleted permanently without switching away first. Session lists reconcile in place after move, restore, and delete operations without reloading the page.
 
 ## Remove
 
