@@ -141,6 +141,7 @@ test('reports running separately from an attached idle session', async () => {
   assert.equal(activeRow.attached, true)
   assert.equal(activeRow.running, true)
   await assert.rejects(active.manager.trash(active.id), /运行中的会话不能删除/)
+  await assert.rejects(active.manager.deleteForever(active.id), /运行中的会话不能永久删除/)
 })
 
 test('permanently removes a trashed payload', async () => {
@@ -149,6 +150,37 @@ test('permanently removes a trashed payload', async () => {
 
   await f.manager.purge(moved.trashId)
   assert.equal((await f.manager.list()).trash.length, 0)
+  assert.equal(f.disposed(), true)
+  await assert.rejects(stat(f.artifact), /ENOENT/)
+})
+
+test('permanently deletes a cold session without using trash', async () => {
+  const f = await fixture({ archived: true })
+
+  const deleted = await f.manager.deleteForever(f.id)
+  assert.equal(deleted.title, 'Release validation')
+  assert.equal((await f.manager.list()).trash.length, 0)
+  assert.equal(f.disposed(), true)
+  assert.deepEqual(f.workspaceSessions, [])
+  assert.deepEqual(f.registry.archivedSessionIds, [])
+  assert.equal(f.projectionDeleted(), true)
+  await assert.rejects(stat(f.sessionDirectory), /ENOENT/)
+})
+
+test('refuses to permanently delete an attached session', async () => {
+  const f = await fixture({ live: true })
+
+  await assert.rejects(f.manager.deleteForever(f.id), /已打开的会话不能永久删除/)
+  assert.equal(await readFile(f.artifact, 'utf8'), 'durable session bytes')
+})
+
+test('empties all valid trash entries', async () => {
+  const f = await fixture()
+  await f.manager.trash(f.id)
+
+  assert.deepEqual(await f.manager.emptyTrash(), { deleted: 1 })
+  assert.equal((await f.manager.list()).trash.length, 0)
+  assert.equal(f.disposed(), true)
   await assert.rejects(stat(f.artifact), /ENOENT/)
 })
 
@@ -159,4 +191,7 @@ test('reconciles DSH client state without reloading the page', async () => {
   assert.match(client, /ctx\.sessions\.refresh\(\)/)
   assert.match(client, /ctx\.workspaces\.refresh\(\)/)
   assert.match(client, /const inject = \["slots", "sessions", "workspaces"\]/)
+  assert.match(client, /sidebar\.footer\.action/)
+  assert.match(client, /永久删除会话…/)
+  assert.match(client, /清空回收站/)
 })

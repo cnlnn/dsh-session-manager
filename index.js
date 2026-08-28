@@ -327,6 +327,40 @@ export class SessionTrashManager {
     }
   }
 
+  async deleteForever(sessionId) {
+    const initialState = sessionState(this.ctx, sessionId)
+    if (initialState.running) {
+      throw new Error('运行中的会话不能永久删除，请等待任务结束')
+    }
+    if (initialState.attached) {
+      throw new Error('已打开的会话不能永久删除，请先切换到其他会话')
+    }
+    const meta = await requireStoredSession(this.ctx, sessionId)
+    const preparation = await this.ctx.sessionPersistence.prepare(meta.id)
+    try {
+      const reservedState = sessionState(this.ctx, sessionId)
+      if (reservedState.running) {
+        throw new Error('运行中的会话不能永久删除，请等待任务结束')
+      }
+      if (reservedState.attached) {
+        throw new Error('已打开的会话不能永久删除，请先切换到其他会话')
+      }
+      const preparedMeta = preparation.session.header
+      const { sessionDirectory } = sessionDirectoryFor(this.ctx, preparedMeta)
+      const metadata = workspaceMetadata(this.ctx, sessionId)
+      const sessionInfo = await lstat(sessionDirectory)
+      if (!sessionInfo.isDirectory() || sessionInfo.isSymbolicLink()) throw new Error('invalid session directory')
+      const title = titleFor(this.ctx, preparedMeta)
+      await rm(sessionDirectory, { recursive: true })
+      await cleanDerivedMetadata(this.ctx, sessionId, metadata).catch(error => {
+        this.ctx.logger?.warn(`session-manager: deleted "${sessionId}" but could not remove all derived metadata: ${errorMessage(error)}`)
+      })
+      return { sessionId, title }
+    } finally {
+      preparation[Symbol.dispose]()
+    }
+  }
+
   async restore(trashId) {
     const { entryDirectory, manifest } = await findTrashEntry(this.trashDirectory, trashId)
     if (this.ctx.sessions.get(manifest.sessionId) !== undefined) throw new Error('a live session already uses this id')
@@ -341,11 +375,7 @@ export class SessionTrashManager {
     await restoreWorkspaceMetadata(this.ctx, manifest).catch(error => {
       this.ctx.logger?.warn(`session-manager: restored "${manifest.sessionId}" but could not restore all workspace metadata: ${errorMessage(error)}`)
     })
-    const preparation = this.reservations.get(manifest.sessionId)
-    if (preparation !== undefined) {
-      this.reservations.delete(manifest.sessionId)
-      preparation[Symbol.dispose]()
-    }
+    this.releaseReservation(manifest.sessionId)
     await rm(entryDirectory, { recursive: true, force: true }).catch(error => {
       this.ctx.logger?.warn(`session-manager: restored "${manifest.sessionId}" but could not remove its empty trash entry: ${errorMessage(error)}`)
     })
@@ -355,7 +385,25 @@ export class SessionTrashManager {
   async purge(trashId) {
     const { entryDirectory, manifest } = await findTrashEntry(this.trashDirectory, trashId)
     await rm(entryDirectory, { recursive: true })
+    this.releaseReservation(manifest.sessionId)
     return manifest
+  }
+
+  async emptyTrash() {
+    const entries = await listTrash(this.trashDirectory)
+    for (const entry of entries) await this.purge(entry.trashId)
+    return { deleted: entries.length }
+  }
+
+  releaseReservation(sessionId) {
+    const preparation = this.reservations.get(sessionId)
+    if (preparation === undefined) return
+    this.reservations.delete(sessionId)
+    preparation[Symbol.dispose]()
+  }
+
+  dispose() {
+    for (const sessionId of [...this.reservations.keys()]) this.releaseReservation(sessionId)
   }
 }
 
@@ -391,11 +439,14 @@ export function apply(ctx, config) {
     const disposers = [
       registerRoute(ctx, 'sessions', () => manager.list()),
       registerRoute(ctx, 'trash', body => manager.trash(requireString(body, 'sessionId'))),
+      registerRoute(ctx, 'delete', body => manager.deleteForever(requireString(body, 'sessionId'))),
       registerRoute(ctx, 'restore', body => manager.restore(requireString(body, 'trashId'))),
       registerRoute(ctx, 'purge', body => manager.purge(requireString(body, 'trashId'))),
+      registerRoute(ctx, 'empty', () => manager.emptyTrash()),
     ]
     return () => {
       for (const dispose of disposers) dispose()
+      manager.dispose()
     }
   }, 'session-manager routes')
 }
