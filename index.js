@@ -80,12 +80,19 @@ function requireString(record, key) {
   return value
 }
 
-function titleFor(ctx, meta) {
+function projectionFor(ctx, meta) {
   try {
     const session = ctx.sessions.get(meta.id)
-    const snapshot = session === undefined
+    return session === undefined
       ? ctx.get('sessionProjectionCache')?.cachedSnapshot(meta)
       : ctx.get('sessionProjections')?.snapshot(session)
+  } catch {
+    return undefined
+  }
+}
+
+function titleFor(ctx, meta, snapshot = projectionFor(ctx, meta)) {
+  try {
     const title = snapshot?.values?.title
     if (typeof title === 'string' && title.trim().length > 0) return title.trim()
     const prompt = snapshot?.values?.sessionListMetadata?.latestHumanPrompt
@@ -285,12 +292,16 @@ export class SessionTrashManager {
     const sessions = await Promise.all(headers.map(async meta => {
       const location = this.ctx.sessionPersistence.locate(meta)
       const state = sessionState(this.ctx, meta.id)
+      const snapshot = projectionFor(this.ctx, meta)
+      const metadata = workspaceMetadata(this.ctx, meta.id)
       return {
         id: meta.id,
-        title: titleFor(this.ctx, meta),
+        title: titleFor(this.ctx, meta, snapshot),
         cwd: meta.cwd,
         createdAt: meta.createdAt,
+        archived: metadata.archived,
         attached: state.attached,
+        blank: snapshot?.values?.sessionListMetadata?.blank === true,
         running: state.running,
         size: await fileSize(location),
       }

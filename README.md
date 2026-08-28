@@ -11,7 +11,7 @@ This is a community integration and is not an official DeepSeek plugin.
 - Native `Settings → Session Manager` page in DSH
 - Sidebar Trash entry with the pending-session count
 - Move to Trash and Delete Permanently actions in each session's ellipsis menu
-- Session title, workspace, creation time, and storage use
+- Session title, workspace, creation time, storage use, running or idle state, archive state, and blank-session state
 - Protection for running sessions; attached idle sessions can be handled directly
 - Confirmation before removal
 - Restore, permanent deletion, and Empty Trash actions

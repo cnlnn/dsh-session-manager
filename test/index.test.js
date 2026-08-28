@@ -13,7 +13,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function fixture({ live = false, running = false, archived = false } = {}) {
+async function fixture({ live = false, running = false, archived = false, blank = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-session-manager-'))
   roots.push(root)
   const id = 'session-11111111-1111-4111-8111-111111111111'
@@ -85,7 +85,7 @@ async function fixture({ live = false, running = false, archived = false } = {})
     invalidSessionPaths: new Map(),
   }
   const projectionCache = {
-    cachedSnapshot: () => ({ values: { title: 'Release validation' } }),
+    cachedSnapshot: () => ({ values: { title: 'Release validation', sessionListMetadata: { blank } } }),
     async coldSnapshot() { projectionRebuilt = true },
     table: { async delete() { projectionDeleted = true } },
   }
@@ -157,6 +157,14 @@ test('reports running separately from an attached idle session', async () => {
   await assert.rejects(active.manager.deleteForever(active.id), /运行中的会话不能永久删除/)
 })
 
+test('marks archived and blank sessions in the inventory', async () => {
+  const f = await fixture({ archived: true, blank: true })
+  const row = (await f.manager.list()).sessions[0]
+
+  assert.equal(row.archived, true)
+  assert.equal(row.blank, true)
+})
+
 test('permanently removes a trashed payload', async () => {
   const f = await fixture()
   const moved = await f.manager.trash(f.id)
@@ -207,6 +215,10 @@ test('reconciles DSH client state without reloading the page', async () => {
   assert.match(client, /const inject = \["slots", "sessions", "workspaces"\]/)
   assert.match(client, /sidebar\.footer\.action/)
   assert.match(client, /IconDownloadOutline16/)
+  assert.match(client, /已归档/)
+  assert.match(client, /空会话/)
+  assert.match(client, /空闲/)
+  assert.doesNotMatch(client, />已打开</)
   assert.match(client, /永久删除会话/)
   assert.match(client, /清空回收站/)
 })
