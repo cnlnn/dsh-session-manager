@@ -192,6 +192,6 @@ test('reconciles DSH client state without reloading the page', async () => {
   assert.match(client, /ctx\.workspaces\.refresh\(\)/)
   assert.match(client, /const inject = \["slots", "sessions", "workspaces"\]/)
   assert.match(client, /sidebar\.footer\.action/)
-  assert.match(client, /永久删除会话…/)
+  assert.match(client, /永久删除会话/)
   assert.match(client, /清空回收站/)
 })
