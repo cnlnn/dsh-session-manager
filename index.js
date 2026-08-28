@@ -95,6 +95,12 @@ function titleFor(ctx, meta) {
   return meta.id
 }
 
+function sessionState(ctx, sessionId) {
+  const attached = ctx.sessions.get(sessionId) !== undefined
+  const running = ctx.get('agents')?.get(sessionId)?.status === 'running'
+  return { attached, running }
+}
+
 async function fileSize(location) {
   if (location === undefined) return 0
   try {
@@ -246,12 +252,14 @@ export class SessionTrashManager {
     const headers = await this.ctx.sessionPersistence.list()
     const sessions = await Promise.all(headers.map(async meta => {
       const location = this.ctx.sessionPersistence.locate(meta)
+      const state = sessionState(this.ctx, meta.id)
       return {
         id: meta.id,
         title: titleFor(this.ctx, meta),
         cwd: meta.cwd,
         createdAt: meta.createdAt,
-        live: this.ctx.sessions.get(meta.id) !== undefined,
+        attached: state.attached,
+        running: state.running,
         size: await fileSize(location),
       }
     }))
@@ -260,15 +268,23 @@ export class SessionTrashManager {
   }
 
   async trash(sessionId) {
-    if (this.ctx.sessions.get(sessionId) !== undefined) {
-      throw new Error('运行中的会话不能删除，请先切换到其他会话')
+    const initialState = sessionState(this.ctx, sessionId)
+    if (initialState.running) {
+      throw new Error('运行中的会话不能删除，请等待任务结束')
+    }
+    if (initialState.attached) {
+      throw new Error('已打开的会话不能删除，请先切换到其他会话')
     }
     const meta = await requireStoredSession(this.ctx, sessionId)
     const preparation = await this.ctx.sessionPersistence.prepare(meta.id)
     let entryDirectory
     try {
-      if (this.ctx.sessions.get(sessionId) !== undefined) {
-        throw new Error('运行中的会话不能删除，请先切换到其他会话')
+      const reservedState = sessionState(this.ctx, sessionId)
+      if (reservedState.running) {
+        throw new Error('运行中的会话不能删除，请等待任务结束')
+      }
+      if (reservedState.attached) {
+        throw new Error('已打开的会话不能删除，请先切换到其他会话')
       }
       const preparedMeta = preparation.session.header
       const { sessionDirectory } = sessionDirectoryFor(this.ctx, preparedMeta)

@@ -12,7 +12,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function fixture({ live = false, archived = false } = {}) {
+async function fixture({ live = false, running = false, archived = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-session-manager-'))
   roots.push(root)
   const id = 'session-11111111-1111-4111-8111-111111111111'
@@ -82,7 +82,9 @@ async function fixture({ live = false, archived = false } = {}) {
   const ctx = {
     sessionPersistence: persistence,
     sessions: { get: sessionId => liveSessions.get(sessionId) },
-    get: service => service === 'sessionProjectionCache'
+    get: service => service === 'agents'
+      ? { get: sessionId => sessionId === id && running ? { status: 'running' } : undefined }
+      : service === 'sessionProjectionCache'
       ? projectionCache
       : service === 'workspaceRegistry' ? registry : undefined,
   }
@@ -124,8 +126,21 @@ test('moves a cold persisted session to trash and restores it', async () => {
 
 test('refuses to move a live session', async () => {
   const f = await fixture({ live: true })
-  await assert.rejects(f.manager.trash(f.id), /运行中的会话不能删除/)
+  await assert.rejects(f.manager.trash(f.id), /已打开的会话不能删除/)
   assert.equal(await readFile(f.artifact, 'utf8'), 'durable session bytes')
+})
+
+test('reports running separately from an attached idle session', async () => {
+  const idle = await fixture({ live: true })
+  const idleRow = (await idle.manager.list()).sessions[0]
+  assert.equal(idleRow.attached, true)
+  assert.equal(idleRow.running, false)
+
+  const active = await fixture({ live: true, running: true })
+  const activeRow = (await active.manager.list()).sessions[0]
+  assert.equal(activeRow.attached, true)
+  assert.equal(activeRow.running, true)
+  await assert.rejects(active.manager.trash(active.id), /运行中的会话不能删除/)
 })
 
 test('permanently removes a trashed payload', async () => {

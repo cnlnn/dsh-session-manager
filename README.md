@@ -9,8 +9,9 @@ This is a community integration and is not an official DeepSeek plugin.
 ## Highlights
 
 - Native `Settings → Session Manager` page in DSH
+- Delete Session action in each Workspace session's ellipsis menu
 - Session title, workspace, creation time, and storage use
-- Protection for live sessions
+- Protection for running and attached sessions
 - Confirmation before removal
 - Restore and permanent deletion from trash
 - Linux, macOS, and native Windows support
