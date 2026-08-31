@@ -17,9 +17,28 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { symbols } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { RecoveryClaimStore, SessionRecoveryCoordinator } from './lib/recovery.js'
+
+export {
+  DEFAULT_RECOVERY_MAX_AGE_MS,
+  DEFAULT_RECOVERY_LOCK_HEARTBEAT_MS,
+  RecoveryClaimStore,
+  SessionRecoveryCoordinator,
+  acquireRecoveryLease,
+  recoveryFacts,
+} from './lib/recovery.js'
 
 export const name = 'session-manager'
-export const inject = ['apiProxy', 'sessionPersistence', 'sessions', 'webServer']
+export const inject = [
+  'apiProxy',
+  'sessionPersistence',
+  'sessions',
+  'webServer',
+  'agents',
+  'agentPresets',
+  'agentDefaultModel',
+  'sessionProjectionCache',
+]
 
 const API_ROOT = '/plugins/@local/dsh-session-manager/api'
 const MANIFEST_NAME = 'manifest.json'
@@ -30,6 +49,7 @@ export const SETTINGS_NAMESPACE = settingsNamespace('session-manager')
 export const Config = z.object({
   trashDirectory: z.string().default(join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'trash')),
   showSidebarTrash: z.boolean().default(true).description('工作区下方显示回收站'),
+  autoRecoverInterruptedGoals: z.boolean().default(true).description('自动恢复意外中断的任务'),
 })
 
 function json(res, status, value) {
@@ -520,21 +540,40 @@ function registerRoute(ctx, route, handler) {
 }
 
 export function apply(ctx, config) {
-  let settingsSource = () => ({ showSidebarTrash: config.showSidebarTrash ?? true })
+  let settingsSource = () => ({
+    showSidebarTrash: config.showSidebarTrash ?? true,
+    autoRecoverInterruptedGoals: config.autoRecoverInterruptedGoals ?? true,
+  })
   const manager = new SessionTrashManager(ctx, {
     ...config,
     get showSidebarTrash() { return settingsSource().showSidebarTrash },
   })
+  const claimStore = new RecoveryClaimStore(join(resolve(config.trashDirectory), '.session-manager-recovery-claims.json'))
+  const recovery = new SessionRecoveryCoordinator(ctx, {
+    enabled: () => settingsSource().autoRecoverInterruptedGoals,
+    leasePath: join(resolve(config.trashDirectory), '.session-manager-recovery.lock'),
+    claimStore,
+  })
   installSettingsSection(
     ctx,
     SETTINGS_NAMESPACE,
-    z.object({ showSidebarTrash: z.boolean().default(true).description('工作区下方显示回收站') }),
-    { showSidebarTrash: config.showSidebarTrash ?? true },
+    z.object({
+      showSidebarTrash: z.boolean().default(true).description('工作区下方显示回收站'),
+      autoRecoverInterruptedGoals: z.boolean().default(true).description('自动恢复意外中断的任务'),
+    }),
+    {
+      showSidebarTrash: config.showSidebarTrash ?? true,
+      autoRecoverInterruptedGoals: config.autoRecoverInterruptedGoals ?? true,
+    },
     {
       setSource(source) { settingsSource = source },
-      onChange() {},
+      onChange() { recovery.setEnabled(() => settingsSource().autoRecoverInterruptedGoals) },
     },
   )
+  ctx.on('session/event', (session, event) => {
+    claimStore.observe(session, event, settingsSource().autoRecoverInterruptedGoals)
+    recovery.observeEvent(event)
+  })
   ctx.effect(() => {
     const disposers = [
       registerRoute(ctx, 'sessions', () => manager.list()),
@@ -544,9 +583,12 @@ export function apply(ctx, config) {
       registerRoute(ctx, 'purge', body => manager.purge(requireString(body, 'trashId'))),
       registerRoute(ctx, 'empty', () => manager.emptyTrash()),
     ]
+    recovery.start()
     return () => {
+      const pending = recovery.dispose()
       for (const dispose of disposers) dispose()
       manager.dispose()
+      return Promise.all([pending, claimStore.dispose()])
     }
   }, 'session-manager routes')
 }

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, test } from 'node:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
-import { moveDirectory, SessionTrashManager } from '../index.js'
+import { inject, moveDirectory, SessionTrashManager } from '../index.js'
 
 const roots = []
 
@@ -259,6 +259,7 @@ test('reconciles DSH client state without reloading the page', async () => {
   assert.match(client, /sidebar\.footer\.action/)
   assert.match(client, /settings\.plugin\.item/)
   assert.match(client, /工作区下方显示回收站/)
+  assert.match(client, /自动恢复意外中断的任务/)
   assert.match(client, /dsm-move-icon-source/)
   assert.match(client, /dsm-undo-icon/)
   assert.match(client, /dsm-icon-button\.dsm-danger/)
@@ -270,4 +271,24 @@ test('reconciles DSH client state without reloading the page', async () => {
   assert.doesNotMatch(client, />已打开</)
   assert.match(client, /永久删除会话/)
   assert.match(client, /清空回收站/)
+})
+
+test('declares recovery service dependencies so startup waits for native DSH services', () => {
+  assert.deepEqual(inject, [
+    'apiProxy',
+    'sessionPersistence',
+    'sessions',
+    'webServer',
+    'agents',
+    'agentPresets',
+    'agentDefaultModel',
+    'sessionProjectionCache',
+  ])
+})
+
+test('keeps the recovery lease inside the configured trash directory', async () => {
+  const indexSource = await readFile(new URL('../index.js', import.meta.url), 'utf8')
+
+  assert.match(indexSource, /leasePath: join\(resolve\(config\.trashDirectory\), '\.session-manager-recovery\.lock'\)/)
+  assert.match(indexSource, /recovery\.observeEvent\(event\)/)
 })
