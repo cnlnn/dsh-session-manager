@@ -410,7 +410,7 @@ test('reschedules once when an interrupted event arrives during reconciliation',
     runs += 1
     return reconcile(...args)
   }
-  coordinator.start()
+  const firstRun = coordinator.start({ immediate: true })
   await entered.promise
   events.push(
     event('turn/start', 4, { turn: 2 }),
@@ -419,7 +419,8 @@ test('reschedules once when an interrupted event arrives during reconciliation',
   )
   coordinator.observeEvent(events.at(-1))
   release.resolve()
-  await waitFor(() => runs >= 2)
+  await firstRun
+  await waitFor(() => runs >= 2 && coordinator.running === undefined)
   await coordinator.dispose()
   assert.equal(runs, 2)
   assert.equal(f.resumeCount, 1)
