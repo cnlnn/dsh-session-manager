@@ -30,11 +30,13 @@
 
 | 项目 | 版本 |
 | --- | --- |
-| DeepSeek Harness | `0.1.1-rc.2` |
+| DeepSeek Harness | `0.1.1-rc.2`、`0.1.5-rc.3`、`0.1.7-rc.1` |
 | Node.js | 22.19+ |
 | 平台 | Linux、macOS、Windows |
 
-当前版本适用于每个会话拥有独立本地文件目录的 DSH 持久化后端，并按 `0.1.1-rc.2` 的会话、Workspace 和投影缓存接口实现。
+支持官方本地 JSONL 持久化后端，兼容旧版会话接口与新版独立读写句柄、快照列表、投影缓存和设置接口。没有可移动会话目录的后端会拒绝删除操作，不会猜测存储路径。新版使用原生会话菜单扩展点，旧版保留菜单适配。
+
+兼容性测试在隔离目录安装上述版本，验证真实 JSONL 后端的列举、写锁保护、回收、恢复、内容完整性与永久删除；不会读取现有 DSH 会话。插件兼容旧版不代表新版 DSH 写入的会话格式可以降级读取。
 
 ## 安装
 
@@ -77,4 +79,5 @@ dsh plugin --profile web remove @local/dsh-session-manager
 ```sh
 npm ci
 npm test
+npm run test:compat -- 0.1.7-rc.1
 ```

@@ -117,6 +117,7 @@ async function fixture({ live = false, running = false, archived = false, blank 
     projectionRebuilt: () => projectionRebuilt,
     workspaceSessions,
     registry,
+    persistence,
   }
 }
 
@@ -142,6 +143,19 @@ test('moves a cold persisted session to trash and restores it', async () => {
   assert.deepEqual(f.workspaceSessions, [f.id])
   assert.deepEqual(f.registry.archivedSessionIds, [f.id])
   assert.equal(f.projectionRebuilt(), true)
+})
+
+test('keeps the moved payload when a new storage handle fails to release', async () => {
+  const f = await fixture()
+  const [header] = await f.persistence.list()
+  delete f.persistence.prepare
+  f.persistence.open = async () => ({ header, async close() { throw new Error('release failed') } })
+  await assert.rejects(f.manager.trash(f.id), /release failed/)
+  const inventory = await f.manager.list()
+  assert.equal(inventory.sessions.length, 0)
+  assert.equal(inventory.trash.length, 1)
+  const payload = join(f.trashDirectory, inventory.trash[0].trashId, 'session', 'session.jsonl.zstd')
+  assert.equal(await readFile(payload, 'utf8'), 'durable session bytes')
 })
 
 test('moves a directory across filesystems through a staged copy', async () => {
@@ -275,7 +289,6 @@ test('reconciles DSH client state without reloading the page', async () => {
 
 test('declares recovery service dependencies so startup waits for native DSH services', () => {
   assert.deepEqual(inject, [
-    'apiProxy',
     'sessionPersistence',
     'sessions',
     'webServer',

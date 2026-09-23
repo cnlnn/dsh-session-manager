@@ -16,8 +16,9 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { symbols } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import * as settings from '@deepseek-ai/dsh-settings'
 import { RecoveryClaimStore, SessionRecoveryCoordinator } from './lib/recovery.js'
+import { rebuildProjection, reserveStored, settingValue, storedHeaders } from './lib/compat.js'
 
 export {
   DEFAULT_RECOVERY_MAX_AGE_MS,
@@ -30,7 +31,6 @@ export {
 
 export const name = 'session-manager'
 export const inject = [
-  'apiProxy',
   'sessionPersistence',
   'sessions',
   'webServer',
@@ -44,12 +44,16 @@ const API_ROOT = '/plugins/@local/dsh-session-manager/api'
 const MANIFEST_NAME = 'manifest.json'
 const PAYLOAD_NAME = 'session'
 const MAX_BODY_BYTES = 16 * 1024
-export const SETTINGS_NAMESPACE = settingsNamespace('session-manager')
+export const SETTINGS_NAMESPACE = settings.settingsNamespace?.('session-manager') ?? 'session-manager'
+
+function liveSetting(schema) {
+  return typeof schema.volatile === 'function' ? schema.volatile() : schema
+}
 
 export const Config = z.object({
   trashDirectory: z.string().default(join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'trash')),
-  showSidebarTrash: z.boolean().default(true).description('工作区下方显示回收站'),
-  autoRecoverInterruptedGoals: z.boolean().default(true).description('自动恢复意外中断的任务'),
+  showSidebarTrash: liveSetting(z.boolean().default(true).description('工作区下方显示回收站')),
+  autoRecoverInterruptedGoals: liveSetting(z.boolean().default(true).description('自动恢复意外中断的任务')),
 })
 
 function json(res, status, value) {
@@ -173,15 +177,39 @@ async function closeIdleSession(ctx, sessionId, action) {
     throw new Error(`无法确认会话已空闲，不能${action}`)
   }
 
-  // ApiProxy owns browser-opened Agent handles but does not expose a close RPC.
-  // Dispose its exact per-session Cordis effect so normal persistence teardown runs.
-  const tracedApiProxy = ctx.get('apiProxy')
-  const apiProxy = tracedApiProxy?.[symbols.original] ?? tracedApiProxy
-  const disposables = apiProxy?.ctx?.fiber?._disposables
+  // Browser-opened Agent handles live on the owner fiber as agentLoop.lifecycle(id).
+  // 0.1.1 used apiProxy; 0.1.5 dropped that service, so also search agents / this fiber.
   const label = `agentLoop.lifecycle(${sessionId})`
-  const lifecycles = disposables === undefined
-    ? []
-    : [...disposables].filter(dispose => dispose?.[symbols.effect]?.label === label)
+  const fibers = []
+  for (const name of ['apiProxy', 'sessionController', 'agents', 'agentLoop']) {
+    const service = ctx.get(name)
+    const unwrapped = service?.[symbols.original] ?? service
+    const fiber = unwrapped?.ctx?.fiber
+    if (fiber !== undefined) fibers.push(fiber)
+  }
+  if (ctx.fiber !== undefined) fibers.push(ctx.fiber)
+  const lifecycles = []
+  const seen = new Set()
+  for (const fiber of fibers) {
+    const effects = typeof fiber.getEffects === 'function' ? fiber.getEffects() : undefined
+    if (Array.isArray(effects)) {
+      for (const effect of effects) {
+        if (effect?.label !== label) continue
+        const dispose = typeof effect.dispose === 'function' ? effect.dispose : typeof effect === 'function' ? effect : undefined
+        if (dispose !== undefined && !seen.has(dispose)) {
+          seen.add(dispose)
+          lifecycles.push(dispose)
+        }
+      }
+    }
+    const disposables = fiber._disposables
+    if (disposables === undefined) continue
+    for (const dispose of disposables) {
+      if (dispose?.[symbols.effect]?.label !== label || seen.has(dispose)) continue
+      seen.add(dispose)
+      lifecycles.push(dispose)
+    }
+  }
   if (lifecycles.length !== 1) {
     throw new Error(`无法安全关闭空闲会话，不能${action}`)
   }
@@ -278,7 +306,7 @@ async function directorySize(path) {
 }
 
 function sessionDirectoryFor(ctx, meta) {
-  const location = ctx.sessionPersistence.locate(meta)
+  const location = ctx.sessionPersistence.locate?.(meta)
   if (location === undefined) throw new Error('the active persistence backend has no movable session artifact')
   const sessionDirectory = dirname(location.path)
   if (basename(sessionDirectory) !== meta.id) throw new Error('unexpected session storage layout')
@@ -286,7 +314,7 @@ function sessionDirectoryFor(ctx, meta) {
 }
 
 async function requireStoredSession(ctx, sessionId) {
-  const headers = await ctx.sessionPersistence.list()
+  const headers = await storedHeaders(ctx.sessionPersistence)
   const meta = headers.find(header => header.id === sessionId)
   if (meta === undefined) throw new Error('session not found')
   return meta
@@ -300,6 +328,7 @@ function workspaceMetadata(ctx, sessionId) {
       .filter(workspace => workspace.sessionIds.includes(sessionId))
       .map(workspace => workspace.id),
     archived: registry.archivedSessionIds.includes(sessionId),
+    pinned: registry.pinnedSessionIds?.includes(sessionId) ?? false,
   }
 }
 
@@ -310,6 +339,7 @@ async function removeProjectionMetadata(ctx, sessionId) {
 async function cleanDerivedMetadata(ctx, sessionId, metadata, removeProjection) {
   const registry = ctx.get('workspaceRegistry')
   if (registry !== undefined) {
+    if (metadata.pinned) await registry.unpinSession?.(sessionId)
     for (const workspaceId of metadata.workspaceIds) {
       await registry.get(workspaceId)?.detachSession(sessionId)
     }
@@ -333,6 +363,7 @@ async function restoreWorkspaceMetadata(ctx, manifest) {
     await registry.get(workspaceId)?.attachSession(manifest.sessionId)
   }
   if (manifest.archived === true) await registry.archiveSession(manifest.sessionId)
+  else if (manifest.pinned === true) await registry.pinSession?.(manifest.sessionId)
 }
 
 export class SessionTrashManager {
@@ -344,9 +375,9 @@ export class SessionTrashManager {
   }
 
   async list() {
-    const headers = await this.ctx.sessionPersistence.list()
+    const headers = await storedHeaders(this.ctx.sessionPersistence)
     const sessions = await Promise.all(headers.map(async meta => {
-      const location = this.ctx.sessionPersistence.locate(meta)
+      const location = this.ctx.sessionPersistence.locate?.(meta)
       const state = sessionState(this.ctx, meta.id)
       const snapshot = projectionFor(this.ctx, meta)
       const metadata = workspaceMetadata(this.ctx, meta.id)
@@ -356,11 +387,12 @@ export class SessionTrashManager {
         cwd: meta.cwd,
         createdAt: meta.createdAt,
         archived: metadata.archived,
+        pinned: metadata.pinned,
         workspaceIds: metadata.workspaceIds,
         attached: state.attached,
         blank: snapshot?.values?.sessionListMetadata?.blank === true,
         running: state.running,
-        size: await fileSize(location),
+        size: location === undefined ? 0 : await directorySize(dirname(location.path)).catch(() => fileSize(location)),
       }
     }))
     sessions.sort((a, b) => timestampOf(b.createdAt) - timestampOf(a.createdAt))
@@ -378,8 +410,9 @@ export class SessionTrashManager {
     }
     await closeIdleSession(this.ctx, sessionId, '移动到回收站')
     const meta = await requireStoredSession(this.ctx, sessionId)
-    const preparation = await this.ctx.sessionPersistence.prepare(meta.id)
+    const preparation = await reserveStored(this.ctx.sessionPersistence, meta.id)
     let entryDirectory
+    let payloadMoved = false
     try {
       const reservedState = sessionState(this.ctx, sessionId)
       if (reservedState.running) {
@@ -388,7 +421,7 @@ export class SessionTrashManager {
       if (reservedState.attached) {
         throw new Error('已打开的会话不能删除，请先切换到其他会话')
       }
-      const preparedMeta = preparation.session.header
+      const preparedMeta = preparation.header
       const { sessionDirectory } = sessionDirectoryFor(this.ctx, preparedMeta)
       const metadata = workspaceMetadata(this.ctx, sessionId)
       const sessionInfo = await lstat(sessionDirectory)
@@ -409,20 +442,23 @@ export class SessionTrashManager {
         originalDirectory: sessionDirectory,
         workspaceIds: metadata.workspaceIds,
         archived: metadata.archived,
+        pinned: metadata.pinned,
       }
       await writeFile(manifestPath(entryDirectory), `${JSON.stringify(manifest, null, 2)}\n`, {
         flag: 'wx',
         mode: 0o600,
       })
       await moveDirectory(sessionDirectory, join(entryDirectory, PAYLOAD_NAME))
+      payloadMoved = true
       await cleanDerivedMetadata(this.ctx, sessionId, metadata, false).catch(error => {
         this.ctx.logger?.warn(`session-manager: moved "${sessionId}" but could not remove all derived metadata: ${errorMessage(error)}`)
       })
-      this.reservations.set(sessionId, preparation)
+      if (preparation.retain) this.reservations.set(sessionId, preparation)
+      else await preparation.release()
       return manifest
     } catch (error) {
-      preparation[Symbol.dispose]()
-      if (entryDirectory !== undefined && error?.preserveDestination !== true) {
+      await preparation.release()
+      if (entryDirectory !== undefined && !payloadMoved && error?.preserveDestination !== true) {
         await rm(entryDirectory, { recursive: true, force: true }).catch(() => {})
       }
       throw error
@@ -436,7 +472,7 @@ export class SessionTrashManager {
     }
     await closeIdleSession(this.ctx, sessionId, '永久删除')
     const meta = await requireStoredSession(this.ctx, sessionId)
-    const preparation = await this.ctx.sessionPersistence.prepare(meta.id)
+    const preparation = await reserveStored(this.ctx.sessionPersistence, meta.id)
     try {
       const reservedState = sessionState(this.ctx, sessionId)
       if (reservedState.running) {
@@ -445,7 +481,7 @@ export class SessionTrashManager {
       if (reservedState.attached) {
         throw new Error('已打开的会话不能永久删除，请先切换到其他会话')
       }
-      const preparedMeta = preparation.session.header
+      const preparedMeta = preparation.header
       const { sessionDirectory } = sessionDirectoryFor(this.ctx, preparedMeta)
       const metadata = workspaceMetadata(this.ctx, sessionId)
       const sessionInfo = await lstat(sessionDirectory)
@@ -457,14 +493,14 @@ export class SessionTrashManager {
       })
       return { sessionId, title }
     } finally {
-      preparation[Symbol.dispose]()
+      await preparation.release()
     }
   }
 
   async restore(trashId) {
     const { entryDirectory, manifest } = await findTrashEntry(this.trashDirectory, trashId)
     if (this.ctx.sessions.get(manifest.sessionId) !== undefined) throw new Error('a live session already uses this id')
-    const headers = await this.ctx.sessionPersistence.list()
+    const headers = await storedHeaders(this.ctx.sessionPersistence)
     if (headers.some(header => header.id === manifest.sessionId)) throw new Error('a stored session already uses this id')
     await mkdir(dirname(manifest.originalDirectory), { recursive: true, mode: 0o700 })
     await access(manifest.originalDirectory, constants.F_OK).then(
@@ -472,7 +508,7 @@ export class SessionTrashManager {
       error => { if (error?.code !== 'ENOENT') throw error },
     )
     await moveDirectory(join(entryDirectory, PAYLOAD_NAME), manifest.originalDirectory)
-    await this.ctx.get('sessionProjectionCache')?.coldSnapshot(manifest.sessionId).catch(error => {
+    await rebuildProjection(this.ctx, manifest.sessionId).catch(error => {
       this.ctx.logger?.warn(`session-manager: restored "${manifest.sessionId}" but could not rebuild its title metadata: ${errorMessage(error)}`)
     })
     await restoreWorkspaceMetadata(this.ctx, manifest).catch(error => {
@@ -505,7 +541,7 @@ export class SessionTrashManager {
     const preparation = this.reservations.get(sessionId)
     if (preparation === undefined) return
     this.reservations.delete(sessionId)
-    preparation[Symbol.dispose]()
+    preparation.release()
   }
 
   dispose() {
@@ -541,8 +577,8 @@ function registerRoute(ctx, route, handler) {
 
 export function apply(ctx, config) {
   let settingsSource = () => ({
-    showSidebarTrash: config.showSidebarTrash ?? true,
-    autoRecoverInterruptedGoals: config.autoRecoverInterruptedGoals ?? true,
+    showSidebarTrash: settingValue(config.showSidebarTrash, true),
+    autoRecoverInterruptedGoals: settingValue(config.autoRecoverInterruptedGoals, true),
   })
   const manager = new SessionTrashManager(ctx, {
     ...config,
@@ -554,22 +590,28 @@ export function apply(ctx, config) {
     leasePath: join(resolve(config.trashDirectory), '.session-manager-recovery.lock'),
     claimStore,
   })
-  installSettingsSection(
-    ctx,
+  const settingsArgs = [
     SETTINGS_NAMESPACE,
     z.object({
       showSidebarTrash: z.boolean().default(true).description('工作区下方显示回收站'),
       autoRecoverInterruptedGoals: z.boolean().default(true).description('自动恢复意外中断的任务'),
     }),
-    {
-      showSidebarTrash: config.showSidebarTrash ?? true,
-      autoRecoverInterruptedGoals: config.autoRecoverInterruptedGoals ?? true,
-    },
+    settingsSource(),
     {
       setSource(source) { settingsSource = source },
       onChange() { recovery.setEnabled(() => settingsSource().autoRecoverInterruptedGoals) },
     },
-  )
+  ]
+  if (typeof settings.installSettingsSection === 'function') settings.installSettingsSection(ctx, ...settingsArgs)
+  else {
+    ctx.inject(['settings'], sctx => {
+      if (typeof sctx.settings.installSection === 'function') sctx.settings.installSection(ctx, ...settingsArgs)
+      else sctx.effect(() => sctx.settings.configure({ auto: false }, ctx.fiber))
+    })
+    ctx.on('settings/document-updated', () => {
+      recovery.setEnabled(() => settingsSource().autoRecoverInterruptedGoals)
+    })
+  }
   ctx.on('session/event', (session, event) => {
     claimStore.observe(session, event, settingsSource().autoRecoverInterruptedGoals)
     recovery.observeEvent(event)

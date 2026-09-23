@@ -30,11 +30,13 @@ Restore moves the directory back to its original location. Permanent deletion ca
 
 | Component | Version |
 | --- | --- |
-| DeepSeek Harness | `0.1.1-rc.2` |
+| DeepSeek Harness | `0.1.1-rc.2`, `0.1.5-rc.3`, `0.1.7-rc.1` |
 | Node.js | 22.19+ |
 | Platforms | Linux, macOS, Windows |
 
-This release supports DSH persistence backends that expose one local artifact directory per session and targets the session, Workspace, and projection-cache interfaces in `0.1.1-rc.2`.
+Supports the official local JSONL backend through both legacy APIs and newer per-session handles, snapshot listings, projection caches, and settings APIs. Backends without a movable session directory refuse deletion rather than guessing storage paths. Newer hosts use native session-menu slots; older hosts retain the menu adapter.
+
+The compatibility matrix installs each version in isolation and checks real JSONL inventory, write-lock protection, trash, restore, content integrity, and permanent deletion without reading existing DSH sessions. Backward plugin compatibility does not imply that older DSH versions can read newer session formats.
 
 ## Install
 
@@ -77,4 +79,5 @@ Removal leaves `$DSH_HOME/trash` untouched. Reinstall the plugin to restore or p
 ```sh
 npm ci
 npm test
+npm run test:compat -- 0.1.7-rc.1
 ```

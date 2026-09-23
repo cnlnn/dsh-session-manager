@@ -81,6 +81,7 @@ function makeContext(root, events, {
   origin,
   parentSession,
   ownedBy = false,
+  modern = false,
 } = {}) {
   const sessionId = 'session-recovery-1'
   const meta = {
@@ -124,7 +125,8 @@ function makeContext(root, events, {
         async whenIdle() {},
       }
       resumeOptions = options
-      await options.setup?.({ agent, on: () => () => {} })
+      if (modern) await options.setup?.({ on: () => () => {} }, agent)
+      else await options.setup?.({ agent, on: () => () => {} })
       liveAgents.set(resumeSessionId, agent)
       return { agent, async dispose() { liveAgents.delete(resumeSessionId) } }
     },
@@ -184,6 +186,24 @@ function makeContext(root, events, {
     cachedSnapshot: () => cacheAsOfSeq === undefined ? undefined : { asOfSeq: cacheAsOfSeq, values: {} },
     async coldSnapshot() { cacheReconciled += 1 },
   }
+  if (modern) {
+    delete persistence.readFrom
+    delete persistence.inspect
+    delete persistence.listSnapshots
+    persistence.list = async () => [{ header: meta, revision }]
+    persistence.stat = async () => ({ header: meta, revision })
+    persistence.open = async () => ({
+      header: meta, inheritedEventCount: 0,
+      async read() { readCount += 1; return { events } },
+      async close() {},
+    })
+    cache.coldSnapshot = (header, cut, log) => {
+      assert.equal(header, meta)
+      assert.equal(cut, 0)
+      assert.equal(log, events)
+      cacheReconciled += 1
+    }
+  }
   const logs = []
   const ctx = {
     sessions,
@@ -218,6 +238,21 @@ test('recovery facts identify a balanced interrupted turn and active goal', () =
   assert.equal(facts.closers.length, 0)
   assert.equal(facts.goal.goal.phase, 'active')
   assert.equal(facts.unknownToolOutcomes, 0)
+})
+
+test('handle-based recovery preserves preset setup and uses the explicit Agent argument', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-recovery-modern-'))
+  roots.push(root)
+  const f = makeContext(root, interruptedEvents({ balanced: true }), { modern: true })
+  const coordinator = new SessionRecoveryCoordinator(f.ctx, { leasePath: join(root, 'recovery.lock') })
+  try {
+    const result = await coordinator.reconcile()
+    assert.equal(result.resumed, 1)
+    assert.equal(f.presetMountCount, 1)
+    assert.equal(f.cacheReconciled, 1)
+  } finally {
+    await coordinator.dispose()
+  }
 })
 
 test('uses the interrupted boundary rather than trailing metadata for age', () => {
