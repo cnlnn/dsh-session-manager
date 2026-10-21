@@ -116,8 +116,14 @@ test('modern client slots render with renamed icons and native session menu hook
     useEffect() {},
     useCallback: value => value,
   }
+  const menuButtons = []
   const icon = () => null
-  const primitives = { IconChevronDownOutlineRegular: icon, IconCloseOutlineRegular: icon, IconTrashOutlineRegular: icon, MenuItemButton: icon }
+  const primitives = {
+    IconChevronDownOutlineRegular: icon,
+    IconCloseOutlineRegular: icon,
+    IconTrashOutlineRegular: icon,
+    MenuItemButton(props) { menuButtons.push(props); return null },
+  }
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
     window: { __ModuleLoader__: { load(definition) { client = definition.factory(name => name === 'react' ? React : primitives) } } },
     document: { querySelector: () => ({}) },
@@ -134,11 +140,15 @@ test('modern client slots render with renamed icons and native session menu hook
   for (const { component } of entries) component({ wide: true, sessionId: 'test', useMenuOpenState: () => [false, () => {}] })
   assert.equal(entries.filter(row => row.options.name === 'sidebar.workspaces.session.menu.item').length, 2)
   assert.equal(entries.filter(row => row.options.name === 'settings.plugins.tab').length, 1)
+  const labelOf = row => Array.isArray(row.children) ? row.children.join('') : row.children
+  assert.equal(menuButtons.find(row => labelOf(row) === '永久删除会话')?.danger, true)
+  assert.notEqual(menuButtons.find(row => labelOf(row) === '移到回收站')?.danger, true)
 })
 
 let Jsonl
 try {
-  Jsonl = (await import('@deepseek-ai/dsh-session-persistence-jsonl')).default
+  const module = await import('@deepseek-ai/dsh-session-persistence-jsonl')
+  Jsonl = module.default ?? module
 } catch (error) {
   if (error.code !== 'ERR_MODULE_NOT_FOUND' || !error.message.includes("'@deepseek-ai/dsh-session-persistence-jsonl'")) throw error
 }
@@ -165,7 +175,11 @@ for (const compression of ['none', 'zstd']) test(`real JSONL (${compression}): i
     assert.deepEqual((await readStored(p, id)).events, [event])
     if (typeof p.open === 'function') {
       const writer = await p.open(id, 'write')
-      try { await assert.rejects(manager.trash(id)) } finally { await writer.close() }
+      try {
+        await assert.rejects(manager.trash(id))
+        await assert.rejects(manager.deleteForever(id))
+        assert.deepEqual((await readStored(p, id)).events, [event])
+      } finally { await writer.close() }
       assert.equal((await manager.list()).sessions.length, 1)
     }
     const trashed = await manager.trash(id)

@@ -13,7 +13,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function fixture({ live = false, running = false, archived = false, blank = false } = {}) {
+async function fixture({ live = false, running = false, archived = false, blank = false, predecessorTitle = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-session-manager-'))
   roots.push(root)
   const id = 'session-11111111-1111-4111-8111-111111111111'
@@ -43,18 +43,23 @@ async function fixture({ live = false, running = false, archived = false, blank 
   }
   closeLifecycle[Context.effect] = { label: `agentLoop.lifecycle(${id})`, children: [] }
   const apiProxy = { ctx: { fiber: { _disposables: new Set([closeLifecycle]) } } }
+  const known = new Map([[id, meta]])
   const persistence = {
     locate: header => ({ kind: 'jsonl', path: join(root, 'sessions', 'workspace-key', header.id, 'session.jsonl.zstd') }),
     list: async () => {
-      try {
-        await stat(artifact)
-        return [meta]
-      } catch {
-        return []
+      const present = []
+      for (const header of known.values()) {
+        try {
+          await stat(join(root, 'sessions', 'workspace-key', header.id, 'session.jsonl.zstd'))
+          present.push(header)
+        } catch {
+          // A removed session drops out of the inventory.
+        }
       }
+      return present
     },
-    prepare: async () => ({
-      session: { header: meta },
+    prepare: async requested => ({
+      session: { header: known.get(requested) ?? meta },
       [Symbol.dispose]() { disposed = true },
     }),
   }
@@ -85,7 +90,8 @@ async function fixture({ live = false, running = false, archived = false, blank 
     invalidSessionPaths: new Map(),
   }
   const projectionCache = {
-    cachedSnapshot: () => ({ values: { title: 'Release validation', sessionListMetadata: { blank } } }),
+    cachedSnapshot: () => predecessorTitle ? undefined : ({ values: { title: 'Release validation', sessionListMetadata: { blank } } }),
+    cachedPredecessorTitle: () => predecessorTitle ? { values: { title: 'Recovered predecessor title' } } : undefined,
     async coldSnapshot() { projectionRebuilt = true },
     table: { async delete() { projectionDeleted = true } },
   }
@@ -118,8 +124,63 @@ async function fixture({ live = false, running = false, archived = false, blank 
     workspaceSessions,
     registry,
     persistence,
+    async addSession(extraId) {
+      const sessionDirectory = join(root, 'sessions', 'workspace-key', extraId)
+      await mkdir(sessionDirectory, { recursive: true })
+      await writeFile(join(sessionDirectory, 'session.jsonl.zstd'), 'extra session bytes')
+      known.set(extraId, {
+        id: extraId,
+        version: 0,
+        cwd,
+        createdAt: Date.parse('2026-08-28T11:00:00.000Z'),
+      })
+      return extraId
+    },
   }
 }
+
+test('removes a session whose log cannot be migrated', async () => {
+  const blocked = new Error('subagent/descriptor 6 uses unsupported descriptor version 2; source v0 artifact remains unchanged')
+  blocked.name = 'SessionFormatUnsupportedError'
+  const deleted = await fixture()
+  deleted.persistence.prepare = async () => { throw blocked }
+  assert.equal((await deleted.manager.deleteForever(deleted.id)).sessionId, deleted.id)
+  await assert.rejects(stat(deleted.artifact), /ENOENT/)
+
+  const moved = await fixture()
+  moved.persistence.prepare = async () => { throw blocked }
+  const entry = await moved.manager.trash(moved.id)
+  await assert.rejects(stat(moved.artifact), /ENOENT/)
+  assert.equal((await moved.manager.list()).trash.length, 1)
+  await moved.manager.restore(entry.trashId)
+  assert.equal(await readFile(moved.artifact, 'utf8'), 'durable session bytes')
+
+  const locked = await fixture({ live: true, running: true })
+  await assert.rejects(locked.manager.deleteForever(locked.id), /运行中的会话不能永久删除/)
+  assert.equal(await readFile(locked.artifact, 'utf8'), 'durable session bytes')
+})
+
+test('applies a batch and keeps going when one session cannot be moved', async () => {
+  const f = await fixture({ live: true, running: true })
+  const extra = await f.addSession('session-22222222-2222-4222-8222-222222222222')
+
+  const result = await f.manager.applyBatch('trash', [f.id, extra, extra])
+  assert.equal(result.succeeded, 1)
+  assert.equal(result.failed.length, 1)
+  assert.equal(result.failed[0].id, f.id)
+  assert.match(result.failed[0].error, /运行中的会话不能删除/)
+  assert.equal((await f.manager.list()).sessions.map(item => item.id).join(','), f.id)
+  assert.equal((await f.manager.list()).trash.length, 1)
+
+  await assert.rejects(f.manager.applyBatch('trash', []), /ids must contain/)
+  await assert.rejects(f.manager.applyBatch('rename', [extra]), /unknown batch operation/)
+})
+
+test('lists a predecessor title when the current projection snapshot is unavailable', async () => {
+  const f = await fixture({ predecessorTitle: true })
+
+  assert.equal((await f.manager.list()).sessions[0].title, 'Recovered predecessor title')
+})
 
 test('moves a cold persisted session to trash and restores it', async () => {
   const f = await fixture({ archived: true })
@@ -139,23 +200,26 @@ test('moves a cold persisted session to trash and restores it', async () => {
   await f.manager.restore(moved.trashId)
   assert.equal(await readFile(f.artifact, 'utf8'), 'durable session bytes')
   assert.equal((await f.manager.list()).trash.length, 0)
-  assert.equal(f.disposed(), true)
+  assert.equal(f.disposed(), false)
   assert.deepEqual(f.workspaceSessions, [f.id])
   assert.deepEqual(f.registry.archivedSessionIds, [f.id])
   assert.equal(f.projectionRebuilt(), true)
 })
 
-test('keeps the moved payload when a new storage handle fails to release', async () => {
-  const f = await fixture()
-  const [header] = await f.persistence.list()
-  delete f.persistence.prepare
-  f.persistence.open = async () => ({ header, async close() { throw new Error('release failed') } })
-  await assert.rejects(f.manager.trash(f.id), /release failed/)
-  const inventory = await f.manager.list()
-  assert.equal(inventory.sessions.length, 0)
-  assert.equal(inventory.trash.length, 1)
-  const payload = join(f.trashDirectory, inventory.trash[0].trashId, 'session', 'session.jsonl.zstd')
-  assert.equal(await readFile(payload, 'utf8'), 'durable session bytes')
+test('trashes and deletes without waiting to migrate the log', async () => {
+  const hung = new Promise(() => {})
+  const trashed = await fixture()
+  let prepared = false
+  trashed.persistence.prepare = () => { prepared = true; return hung }
+  const moved = await trashed.manager.trash(trashed.id)
+  assert.equal(prepared, false)
+  assert.equal(moved.sessionId, trashed.id)
+  await assert.rejects(stat(trashed.artifact), /ENOENT/)
+
+  const removed = await fixture()
+  removed.persistence.prepare = () => hung
+  await removed.manager.deleteForever(removed.id)
+  await assert.rejects(stat(removed.artifact), /ENOENT/)
 })
 
 test('moves a directory across filesystems through a staged copy', async () => {
@@ -228,7 +292,7 @@ test('permanently removes a trashed payload', async () => {
 
   await f.manager.purge(moved.trashId)
   assert.equal((await f.manager.list()).trash.length, 0)
-  assert.equal(f.disposed(), true)
+  assert.equal(f.disposed(), false)
   assert.equal(f.projectionDeleted(), true)
   await assert.rejects(stat(f.artifact), /ENOENT/)
 })
@@ -239,7 +303,7 @@ test('permanently deletes a cold session without using trash', async () => {
   const deleted = await f.manager.deleteForever(f.id)
   assert.equal(deleted.title, 'Release validation')
   assert.equal((await f.manager.list()).trash.length, 0)
-  assert.equal(f.disposed(), true)
+  assert.equal(f.disposed(), false)
   assert.deepEqual(f.workspaceSessions, [])
   assert.deepEqual(f.registry.archivedSessionIds, [])
   assert.equal(f.projectionDeleted(), true)
@@ -259,7 +323,7 @@ test('empties all valid trash entries', async () => {
 
   assert.deepEqual(await f.manager.emptyTrash(), { deleted: 1 })
   assert.equal((await f.manager.list()).trash.length, 0)
-  assert.equal(f.disposed(), true)
+  assert.equal(f.disposed(), false)
   await assert.rejects(stat(f.artifact), /ENOENT/)
 })
 
@@ -277,6 +341,8 @@ test('reconciles DSH client state without reloading the page', async () => {
   assert.match(client, /dsm-move-icon-source/)
   assert.match(client, /dsm-undo-icon/)
   assert.match(client, /dsm-icon-button\.dsm-danger/)
+  assert.match(client, /background:var\(--dsw-alias-bg-layer-2\)/)
+  assert.doesNotMatch(client, /background:var\(--dsw-specific-menu\)/)
   assert.match(client, /已归档/)
   assert.match(client, /空会话/)
   assert.match(client, /空闲/)
@@ -285,6 +351,15 @@ test('reconciles DSH client state without reloading the page', async () => {
   assert.doesNotMatch(client, />已打开</)
   assert.match(client, /永久删除会话/)
   assert.match(client, /清空回收站/)
+  assert.match(client, /批量移到回收站/)
+  assert.match(client, /if \(failed.length > 0\)/)
+  assert.match(client, /event.stopPropagation/)
+  assert.match(client, /反选/)
+  assert.match(client, /startsWith\("batch-"\) \? "batch"/)
+  assert.match(client, /dsm-nav-icon-source/)
+  assert.match(client, /width:28px;height:28px;min-width:28px;max-width:28px/)
+  assert.doesNotMatch(client, /max-width:900px/)
+  assert.doesNotMatch(client, /↻/)
 })
 
 test('declares recovery service dependencies so startup waits for native DSH services', () => {
