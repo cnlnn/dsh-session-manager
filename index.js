@@ -18,7 +18,7 @@ import { symbols } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import * as settings from '@deepseek-ai/dsh-settings'
 import { RecoveryClaimStore, SessionRecoveryCoordinator } from './lib/recovery.js'
-import { rebuildProjection, reserveStored, settingValue, storedHeaders } from './lib/compat.js'
+import { lockStoredDirectory, rebuildProjection, settingValue, storedHeaders } from './lib/compat.js'
 
 export {
   DEFAULT_RECOVERY_MAX_AGE_MS,
@@ -43,7 +43,8 @@ export const inject = [
 const API_ROOT = '/plugins/@local/dsh-session-manager/api'
 const MANIFEST_NAME = 'manifest.json'
 const PAYLOAD_NAME = 'session'
-const MAX_BODY_BYTES = 16 * 1024
+const MAX_BODY_BYTES = 64 * 1024
+const MAX_BATCH = 100
 export const SETTINGS_NAMESPACE = settings.settingsNamespace?.('session-manager') ?? 'session-manager'
 
 function liveSetting(schema) {
@@ -108,6 +109,24 @@ function requireString(record, key) {
   return value
 }
 
+function requireIdList(record, key) {
+  const value = record[key]
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BATCH) {
+    throw new Error(`${key} must contain 1 to ${MAX_BATCH} ids`)
+  }
+  const ids = []
+  const seen = new Set()
+  for (const item of value) {
+    if (typeof item !== 'string' || item.length === 0 || item.length > 512) {
+      throw new Error(`${key} must contain non-empty strings`)
+    }
+    if (seen.has(item)) continue
+    seen.add(item)
+    ids.push(item)
+  }
+  return ids
+}
+
 /** Move a directory without assuming the trash directory is on the same filesystem. */
 export async function moveDirectory(source, target, operations = { rename, cp, rm }) {
   try {
@@ -142,9 +161,11 @@ export async function moveDirectory(source, target, operations = { rename, cp, r
 function projectionFor(ctx, meta) {
   try {
     const session = ctx.sessions.get(meta.id)
-    return session === undefined
-      ? ctx.get('sessionProjectionCache')?.cachedSnapshot(meta)
-      : ctx.get('sessionProjections')?.snapshot(session)
+    if (session !== undefined) return ctx.get('sessionProjections')?.snapshot(session)
+    const cache = ctx.get('sessionProjectionCache')
+    // Current-format checkpoints win. Older checkpoints are rejected by that
+    // read after a format generation change; the host still exposes their title.
+    return cache?.cachedSnapshot(meta) ?? cache?.cachedPredecessorTitle?.(meta)
   } catch {
     return undefined
   }
@@ -213,7 +234,12 @@ async function closeIdleSession(ctx, sessionId, action) {
   if (lifecycles.length !== 1) {
     throw new Error(`无法安全关闭空闲会话，不能${action}`)
   }
-  await lifecycles[0]()
+  await Promise.race([
+    lifecycles[0](),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`关闭空闲会话超时，不能${action}`)), 8000)
+    }),
+  ])
   const remaining = sessionState(ctx, sessionId)
   if (remaining.attached || remaining.agent !== undefined) {
     throw new Error(`空闲会话关闭失败，不能${action}`)
@@ -410,19 +436,15 @@ export class SessionTrashManager {
     }
     await closeIdleSession(this.ctx, sessionId, '移动到回收站')
     const meta = await requireStoredSession(this.ctx, sessionId)
-    const preparation = await reserveStored(this.ctx.sessionPersistence, meta.id)
+    const reservedState = sessionState(this.ctx, sessionId)
+    if (reservedState.running) throw new Error('运行中的会话不能删除，请等待任务结束')
+    if (reservedState.attached) throw new Error('已打开的会话不能删除，请先切换到其他会话')
+    const preparedMeta = meta
+    const { sessionDirectory } = sessionDirectoryFor(this.ctx, preparedMeta)
+    const lease = await lockStoredDirectory(this.ctx.sessionPersistence, meta, sessionDirectory)
     let entryDirectory
     let payloadMoved = false
     try {
-      const reservedState = sessionState(this.ctx, sessionId)
-      if (reservedState.running) {
-        throw new Error('运行中的会话不能删除，请等待任务结束')
-      }
-      if (reservedState.attached) {
-        throw new Error('已打开的会话不能删除，请先切换到其他会话')
-      }
-      const preparedMeta = preparation.header
-      const { sessionDirectory } = sessionDirectoryFor(this.ctx, preparedMeta)
       const metadata = workspaceMetadata(this.ctx, sessionId)
       const sessionInfo = await lstat(sessionDirectory)
       if (!sessionInfo.isDirectory() || sessionInfo.isSymbolicLink()) throw new Error('invalid session directory')
@@ -453,15 +475,14 @@ export class SessionTrashManager {
       await cleanDerivedMetadata(this.ctx, sessionId, metadata, false).catch(error => {
         this.ctx.logger?.warn(`session-manager: moved "${sessionId}" but could not remove all derived metadata: ${errorMessage(error)}`)
       })
-      if (preparation.retain) this.reservations.set(sessionId, preparation)
-      else await preparation.release()
       return manifest
     } catch (error) {
-      await preparation.release()
       if (entryDirectory !== undefined && !payloadMoved && error?.preserveDestination !== true) {
         await rm(entryDirectory, { recursive: true, force: true }).catch(() => {})
       }
       throw error
+    } finally {
+      await lease.release()
     }
   }
 
@@ -472,28 +493,23 @@ export class SessionTrashManager {
     }
     await closeIdleSession(this.ctx, sessionId, '永久删除')
     const meta = await requireStoredSession(this.ctx, sessionId)
-    const preparation = await reserveStored(this.ctx.sessionPersistence, meta.id)
+    const reservedState = sessionState(this.ctx, sessionId)
+    if (reservedState.running) throw new Error('运行中的会话不能永久删除，请等待任务结束')
+    if (reservedState.attached) throw new Error('已打开的会话不能永久删除，请先切换到其他会话')
+    const { sessionDirectory } = sessionDirectoryFor(this.ctx, meta)
+    const lease = await lockStoredDirectory(this.ctx.sessionPersistence, meta, sessionDirectory)
     try {
-      const reservedState = sessionState(this.ctx, sessionId)
-      if (reservedState.running) {
-        throw new Error('运行中的会话不能永久删除，请等待任务结束')
-      }
-      if (reservedState.attached) {
-        throw new Error('已打开的会话不能永久删除，请先切换到其他会话')
-      }
-      const preparedMeta = preparation.header
-      const { sessionDirectory } = sessionDirectoryFor(this.ctx, preparedMeta)
       const metadata = workspaceMetadata(this.ctx, sessionId)
       const sessionInfo = await lstat(sessionDirectory)
       if (!sessionInfo.isDirectory() || sessionInfo.isSymbolicLink()) throw new Error('invalid session directory')
-      const title = titleFor(this.ctx, preparedMeta)
+      const title = titleFor(this.ctx, meta)
       await rm(sessionDirectory, { recursive: true })
       await cleanDerivedMetadata(this.ctx, sessionId, metadata, true).catch(error => {
         this.ctx.logger?.warn(`session-manager: deleted "${sessionId}" but could not remove all derived metadata: ${errorMessage(error)}`)
       })
       return { sessionId, title }
     } finally {
-      await preparation.release()
+      await lease.release()
     }
   }
 
@@ -535,6 +551,28 @@ export class SessionTrashManager {
     const entries = await listTrash(this.trashDirectory)
     for (const entry of entries) await this.purge(entry.trashId)
     return { deleted: entries.length }
+  }
+
+  async applyBatch(op, ids) {
+    const action = {
+      trash: id => this.trash(id),
+      delete: id => this.deleteForever(id),
+      restore: id => this.restore(id),
+      purge: id => this.purge(id),
+    }[op]
+    if (action === undefined) throw new Error('unknown batch operation')
+    const unique = requireIdList({ ids }, 'ids')
+    const failed = []
+    let succeeded = 0
+    for (const id of unique) {
+      try {
+        await action(id)
+        succeeded += 1
+      } catch (error) {
+        failed.push({ id, error: errorMessage(error) })
+      }
+    }
+    return { succeeded, failed }
   }
 
   releaseReservation(sessionId) {
@@ -624,6 +662,7 @@ export function apply(ctx, config) {
       registerRoute(ctx, 'restore', body => manager.restore(requireString(body, 'trashId'))),
       registerRoute(ctx, 'purge', body => manager.purge(requireString(body, 'trashId'))),
       registerRoute(ctx, 'empty', () => manager.emptyTrash()),
+      registerRoute(ctx, 'batch', body => manager.applyBatch(requireString(body, 'op'), requireIdList(body, 'ids'))),
     ]
     recovery.start()
     return () => {

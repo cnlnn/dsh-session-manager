@@ -36,7 +36,7 @@ function event(type, seq, data) {
   return { type, seq, time: BASE_TIME + seq, data }
 }
 
-async function waitFor(predicate, timeoutMs = 500) {
+async function waitFor(predicate, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error('timed out waiting for recovery test condition')

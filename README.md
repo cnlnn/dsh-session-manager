@@ -11,6 +11,7 @@ This is a community integration and is not an official DeepSeek plugin.
 - Native `Settings → Session Manager` page in DSH
 - Optional sidebar Trash entry with the pending-session count
 - Move to Trash and Delete Permanently actions in each session's ellipsis menu
+- Select visible sessions and move, restore, or permanently delete them together; a running session is skipped and reported
 - Search by title, path, or session ID; filter by state; sort by time, title, or storage use
 - Session title, workspace, creation time, storage use, running or idle state, archive state, blank-session state, and unassigned state
 - Protection for running sessions; attached idle sessions can be handled directly
@@ -22,7 +23,7 @@ This is a community integration and is not an official DeepSeek plugin.
 
 ## Data Handling
 
-Moving a session to trash first closes it when it is attached and idle, reserves it through the DSH persistence service, moves its directory to `$DSH_HOME/trash`, and updates its Workspace and archive records. Title projections are preserved and rebuilt during restore, so the original title appears immediately. The plugin does not upload conversation content.
+Moving a session to trash first closes it when it is attached and idle, checks that it has not started or been reopened, then moves the session directory to `$DSH_HOME/trash` and updates its Workspace and archive records. Moving and permanent deletion relocate or remove that directory; they do not decode or migrate the session log. Title projections are preserved and rebuilt during restore, so the original title appears immediately. The plugin does not upload conversation content.
 
 Restore moves the directory back to its original location. Permanent deletion can remove a cold session directly or remove one or every entry from Trash; a directly deleted session never enters Trash.
 
@@ -30,7 +31,7 @@ Restore moves the directory back to its original location. Permanent deletion ca
 
 | Component | Version |
 | --- | --- |
-| DeepSeek Harness | `0.1.1-rc.2`, `0.1.5-rc.3`, `0.1.7-rc.1` |
+| DeepSeek Harness | `0.1.1-rc.2`, `0.1.5-rc.3`, `0.1.7-rc.1`, `0.1.7-rc.2`, `0.2.1-rc.2` |
 | Node.js | 22.19+ |
 | Platforms | Linux, macOS, Windows |
 
@@ -79,5 +80,5 @@ Removal leaves `$DSH_HOME/trash` untouched. Reinstall the plugin to restore or p
 ```sh
 npm ci
 npm test
-npm run test:compat -- 0.1.7-rc.1
+npm run test:compat -- 0.1.7-rc.2
 ```
