@@ -49,6 +49,32 @@ The compatibility matrix installs each version in isolation and checks real JSON
 
 Recovery ownership uses a POSIX kernel file lock or a Windows named mutex. A stalled process retains ownership; process exit releases it. The small `.guard` file remains on POSIX to preserve its lock identity. Incomplete metadata is retained until its stale threshold, then reclaimed under kernel ownership.
 
+### GitHub Release (recommended)
+
+Version 0.5.3 is distributed as a platform-neutral npm tarball. DSH resolves its native runtime dependencies for the host platform during installation.
+
+macOS/Linux:
+
+```sh
+dsh plugin --profile web add --save-exact \
+  "https://github.com/cnlnn/dsh-session-manager/releases/download/v0.5.3/local-dsh-session-manager-0.5.3.tgz"
+dsh --profile web --dump-config
+dsh web --no-open
+```
+
+Windows PowerShell:
+
+```powershell
+dsh plugin --profile web add --save-exact `
+  "https://github.com/cnlnn/dsh-session-manager/releases/download/v0.5.3/local-dsh-session-manager-0.5.3.tgz"
+dsh --profile web --dump-config
+dsh web --no-open
+```
+
+Restart an already running Web profile after installation or upgrade. The release includes `SHA256SUMS` alongside the tarball. Download both assets and run `sha256sum -c SHA256SUMS` on Linux or `shasum -a 256 --check SHA256SUMS` on macOS to verify a local copy.
+
+### From a source checkout
+
 macOS/Linux:
 
 ```sh

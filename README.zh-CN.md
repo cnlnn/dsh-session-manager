@@ -49,6 +49,32 @@
 
 恢复协调使用 POSIX 内核文件锁或 Windows 命名互斥体。进程暂时卡住时保留所有权，进程退出后释放；POSIX 下保留小型 `.guard` 文件以维持锁的身份。未写完的元数据保留至陈旧阈值，再在持有内核锁时回收。
 
+### GitHub Release（推荐）
+
+0.5.3 版本以跨平台 npm tarball 分发，DSH 会在安装时解析当前平台所需的原生运行时依赖。
+
+macOS/Linux：
+
+```sh
+dsh plugin --profile web add --save-exact \
+  "https://github.com/cnlnn/dsh-session-manager/releases/download/v0.5.3/local-dsh-session-manager-0.5.3.tgz"
+dsh --profile web --dump-config
+dsh web --no-open
+```
+
+Windows PowerShell：
+
+```powershell
+dsh plugin --profile web add --save-exact `
+  "https://github.com/cnlnn/dsh-session-manager/releases/download/v0.5.3/local-dsh-session-manager-0.5.3.tgz"
+dsh --profile web --dump-config
+dsh web --no-open
+```
+
+安装或升级后，重启已运行的 Web Profile。Release 同时提供 tarball 和 `SHA256SUMS`；下载两个资产后，Linux 可执行 `sha256sum -c SHA256SUMS`，macOS 可执行 `shasum -a 256 --check SHA256SUMS`，校验本地文件。
+
+### 从源码目录安装
+
 macOS/Linux：
 
 ```sh
