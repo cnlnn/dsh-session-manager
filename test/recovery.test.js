@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
-import { rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, test } from 'node:test'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { acquireRecoveryLease, recoveryFacts, RecoveryClaimStore, SessionRecoveryCoordinator } from '../lib/recovery.js'
 
 const roots = []
@@ -647,6 +649,77 @@ test('a live lease heartbeat prevents takeover past the stale threshold', async 
   const afterRelease = await acquireRecoveryLease(location, { staleAfterMs: 35 })
   assert.notEqual(afterRelease, undefined)
   await afterRelease.release()
+})
+
+test('malformed recovery metadata is preserved while fresh and reclaimed once stale', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-recovery-partial-'))
+  roots.push(root)
+  const location = join(root, 'recovery.lock')
+  for (const contents of ['', '{"version":1,', 'null', '{"token":"partial"}']) {
+    await writeFile(location, contents)
+    await utimes(location, new Date(9950), new Date(9950))
+    assert.equal(await acquireRecoveryLease(location, { now: 10_000, staleAfterMs: 100 }), undefined)
+    assert.equal(await readFile(location, 'utf8'), contents)
+    await utimes(location, new Date(0), new Date(0))
+    const reclaimed = await acquireRecoveryLease(location, { now: 10_000, staleAfterMs: 100 })
+    try {
+      assert.notEqual(reclaimed, undefined)
+      assert.equal(await acquireRecoveryLease(location), undefined)
+    } finally {
+      await reclaimed?.release()
+    }
+  }
+})
+
+test('a stalled holder keeps exclusive recovery ownership until release', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-recovery-stalled-'))
+  roots.push(root)
+  const location = join(root, 'recovery.lock')
+  const first = await acquireRecoveryLease(location, { heartbeatMs: 0 })
+  let contender
+  try {
+    await utimes(location, new Date(0), new Date(0))
+    contender = await acquireRecoveryLease(location, { staleAfterMs: 1, heartbeatMs: 0 })
+    assert.equal(contender, undefined)
+  } finally {
+    await contender?.release()
+    await first.release()
+  }
+})
+
+test('kernel ownership survives a stalled process and is released on process exit', { timeout: 10000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-recovery-process-'))
+  roots.push(root)
+  const location = join(root, 'recovery.lock')
+  const moduleUrl = new URL('../lib/recovery.js', import.meta.url).href
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { acquireRecoveryLease } from ${JSON.stringify(moduleUrl)};
+    const lease = await acquireRecoveryLease(process.argv[1], { heartbeatMs: 0 });
+    if (!lease) process.exit(1);
+    process.send('ready');
+    setInterval(() => {}, 1000);
+  `, location], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+  let successor
+  try {
+    const ready = await Promise.race([
+      once(child, 'message'),
+      once(child, 'exit').then(() => { throw new Error('lock holder exited before acquiring') }),
+    ])
+    assert.equal(ready[0], 'ready')
+    assert.equal(await acquireRecoveryLease(location, { staleAfterMs: 1 }), undefined)
+    const exited = once(child, 'exit')
+    child.kill('SIGKILL')
+    await exited
+    successor = await acquireRecoveryLease(location)
+    assert.notEqual(successor, undefined)
+  } finally {
+    await successor?.release()
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, 'exit')
+      child.kill('SIGKILL')
+      await exited
+    }
+  }
 })
 
 test('supports an injected clock for deterministic lease-age checks', async () => {
