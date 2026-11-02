@@ -23,7 +23,7 @@ This is a community integration and is not an official DeepSeek plugin.
 
 ## Data Handling
 
-Moving a session to trash first closes it when it is attached and idle, checks that it has not started or been reopened, then moves the session directory to `$DSH_HOME/trash` and updates its Workspace and archive records. Moving and permanent deletion relocate or remove that directory; they do not decode or migrate the session log. Title projections are preserved and rebuilt during restore, so the original title appears immediately. The plugin does not upload conversation content.
+Moving a session to trash first checks that the backend supports exclusive ownership, closes it when it is attached and idle, checks that it has not started or been reopened, then locks and moves the session directory to `$DSH_HOME/trash` and updates its Workspace and archive records. A separate directory lease avoids decoding or migrating the session log; write-handle backends retain the host's log-opening behavior. Title projections are preserved and rebuilt during restore, so the original title appears immediately. The plugin does not upload conversation content.
 
 Restore moves the directory back to its original location. Permanent deletion can remove a cold session directly or remove one or every entry from Trash; a directly deleted session never enters Trash.
 
@@ -37,9 +37,17 @@ Restore moves the directory back to its original location. Permanent deletion ca
 
 Supports the official local JSONL backend through both legacy APIs and newer per-session handles, snapshot listings, projection caches, and settings APIs. Backends without a movable session directory refuse deletion rather than guessing storage paths. Newer hosts use native session-menu slots; older hosts retain the menu adapter.
 
-The compatibility matrix installs each version in isolation and checks real JSONL inventory, write-lock protection, trash, restore, content integrity, and permanent deletion without reading existing DSH sessions. Backward plugin compatibility does not imply that older DSH versions can read newer session formats.
+The compatibility matrix installs each version in isolation and checks real JSONL inventory, write ownership, and content integrity without reading existing DSH sessions. Trash and permanent deletion require the backend's exclusive directory lease or write handle; prepare-only backends retain inventory and recovery support and return `SESSION_DIRECTORY_LOCK_UNAVAILABLE` for these mutations. Backends with a directory lease can remove unreadable logs without decoding or migration. Older DSH versions retain their own session-format support.
+
+| Storage API | Inventory and task recovery | Move active sessions to trash or permanently delete them |
+| --- | --- | --- |
+| `prepare` only | Available | Unavailable; existing sessions remain attached |
+| `open(id, 'write')` | Available | Available after the host opens the log and grants write ownership |
+| `acquireLease` | Available | Available under a directory lease, including unreadable logs |
 
 ## Install
+
+Recovery ownership uses a POSIX kernel file lock or a Windows named mutex. A stalled process retains ownership; process exit releases it. The small `.guard` file remains on POSIX to preserve its lock identity. Incomplete metadata is retained until its stale threshold, then reclaimed under kernel ownership.
 
 macOS/Linux:
 

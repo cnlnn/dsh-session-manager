@@ -173,6 +173,16 @@ for (const compression of ['none', 'zstd']) test(`real JSONL (${compression}): i
     manager = new SessionTrashManager(ctx, { trashDirectory: join(root, 'trash') })
     assert.equal((await manager.list()).sessions[0].id, id)
     assert.deepEqual((await readStored(p, id)).events, [event])
+    if (typeof p.acquireLease !== 'function' && typeof p.open !== 'function') {
+      const preparation = await p.prepare(id)
+      try {
+        await assert.rejects(manager.trash(id), { code: 'SESSION_DIRECTORY_LOCK_UNAVAILABLE' })
+        await assert.rejects(manager.deleteForever(id), { code: 'SESSION_DIRECTORY_LOCK_UNAVAILABLE' })
+        assert.deepEqual((await readStored(p, id)).events, [event])
+        assert.equal((await manager.list()).sessions.length, 1)
+      } finally { preparation[Symbol.dispose]() }
+      return
+    }
     if (typeof p.open === 'function') {
       const writer = await p.open(id, 'write')
       try {

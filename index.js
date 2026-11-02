@@ -18,7 +18,7 @@ import { symbols } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import * as settings from '@deepseek-ai/dsh-settings'
 import { RecoveryClaimStore, SessionRecoveryCoordinator } from './lib/recovery.js'
-import { lockStoredDirectory, rebuildProjection, settingValue, storedHeaders } from './lib/compat.js'
+import { lockStoredDirectory, rebuildProjection, requireDirectoryLock, settingValue, storedHeaders, supportsDirectoryLock } from './lib/compat.js'
 
 export {
   DEFAULT_RECOVERY_MAX_AGE_MS,
@@ -418,6 +418,7 @@ export class SessionTrashManager {
         attached: state.attached,
         blank: snapshot?.values?.sessionListMetadata?.blank === true,
         running: state.running,
+        mutable: location !== undefined && supportsDirectoryLock(this.ctx.sessionPersistence),
         size: location === undefined ? 0 : await directorySize(dirname(location.path)).catch(() => fileSize(location)),
       }
     }))
@@ -430,6 +431,7 @@ export class SessionTrashManager {
   }
 
   async trash(sessionId) {
+    requireDirectoryLock(this.ctx.sessionPersistence)
     const initialState = sessionState(this.ctx, sessionId)
     if (initialState.running) {
       throw new Error('运行中的会话不能删除，请等待任务结束')
@@ -487,6 +489,7 @@ export class SessionTrashManager {
   }
 
   async deleteForever(sessionId) {
+    requireDirectoryLock(this.ctx.sessionPersistence)
     const initialState = sessionState(this.ctx, sessionId)
     if (initialState.running) {
       throw new Error('运行中的会话不能永久删除，请等待任务结束')

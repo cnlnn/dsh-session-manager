@@ -33,6 +33,14 @@ try {
   await page.getByRole('button', { name: '会话管理', exact: true }).click()
   await page.getByRole('searchbox', { name: '搜索会话' }).fill(id)
   await page.getByRole('tab', { name: `会话 ${count}`, exact: true }).waitFor()
+  if (initial.sessions.find(row => row.id === id).mutable === false) {
+    const actions = page.locator('.dsm-root button[title="当前存储后端未提供目录锁"]')
+    assert.equal(await actions.count(), 2)
+    for (const action of await actions.all()) assert.equal(await action.isDisabled(), true)
+    assert.equal((await inventory()).sessions.length, count)
+    assert.equal((await inventory()).trash.length, 0)
+    return
+  }
   await page.locator('.dsm-root button[title="移到回收站"]').click()
   await page.getByRole('button', { name: '移到回收站', exact: true }).click()
   await page.getByRole('tab', { name: `会话 ${count - 1}`, exact: true }).waitFor()

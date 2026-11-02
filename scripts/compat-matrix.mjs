@@ -8,8 +8,8 @@ if (!['0.1.1-rc.2', '0.1.5-rc.3', '0.1.7-rc.1', '0.1.7-rc.2', '0.2.1-rc.2'].incl
 const root = await mkdtemp(join(tmpdir(), `dsh-compat-${version}-`))
 for (const path of ['index.js', 'lib', 'test']) await cp(resolve(path), join(root, path), { recursive: true })
 const manifest = JSON.parse(await readFile('package.json', 'utf8'))
-const dependencies = Object.fromEntries(['agent', 'goal', 'session', 'settings', 'session-persistence-jsonl']
-  .map(name => [`@deepseek-ai/dsh-${name}`, version]))
+const dependencies = { ...manifest.dependencies, ...Object.fromEntries(['agent', 'goal', 'session', 'settings', 'session-persistence-jsonl']
+  .map(name => [`@deepseek-ai/dsh-${name}`, version])) }
 dependencies['@deepseek-ai/cordis'] = { '0.1.1-rc.2': '4.0.1', '0.1.5-rc.3': '4.0.2', '0.1.7-rc.1': '4.0.4', '0.1.7-rc.2': '4.0.4', '0.2.1-rc.2': '4.0.5' }[version]
 dependencies['@deepseek-ai/schemastery'] = { '0.1.1-rc.2': '3.18.1', '0.1.5-rc.3': '3.18.2', '0.1.7-rc.1': '3.18.4', '0.1.7-rc.2': '3.18.4', '0.2.1-rc.2': '3.18.5' }[version]
 if (version === '0.1.5-rc.3') {

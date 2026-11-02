@@ -45,6 +45,7 @@ async function fixture({ live = false, running = false, archived = false, blank 
   const apiProxy = { ctx: { fiber: { _disposables: new Set([closeLifecycle]) } } }
   const known = new Map([[id, meta]])
   const persistence = {
+    async acquireLease() { return { async release() {} } },
     locate: header => ({ kind: 'jsonl', path: join(root, 'sessions', 'workspace-key', header.id, 'session.jsonl.zstd') }),
     list: async () => {
       const present = []
@@ -220,6 +221,17 @@ test('trashes and deletes without waiting to migrate the log', async () => {
   removed.persistence.prepare = () => hung
   await removed.manager.deleteForever(removed.id)
   await assert.rejects(stat(removed.artifact), /ENOENT/)
+})
+
+test('unsupported storage leaves attached sessions open and marks them read-only', async () => {
+  const f = await fixture({ live: true })
+  delete f.persistence.acquireLease
+  await assert.rejects(f.manager.trash(f.id), { code: 'SESSION_DIRECTORY_LOCK_UNAVAILABLE' })
+  await assert.rejects(f.manager.deleteForever(f.id), { code: 'SESSION_DIRECTORY_LOCK_UNAVAILABLE' })
+  const listed = (await f.manager.list()).sessions.find(item => item.id === f.id)
+  assert.equal(listed.attached, true)
+  assert.equal(listed.mutable, false)
+  assert.equal(await readFile(f.artifact, 'utf8'), 'durable session bytes')
 })
 
 test('moves a directory across filesystems through a staged copy', async () => {

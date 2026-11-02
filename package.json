@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-session-manager",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "description": "Session trash and recovery for DeepSeek Harness",
   "type": "module",
@@ -14,6 +14,7 @@
     "index.js",
     "lib/client.js",
     "lib/recovery.js",
+    "lib/lease.js",
     "lib/compat.js",
     "cordis.patch.yml",
     "LICENSE",
@@ -23,6 +24,10 @@
   "scripts": {
     "test": "node --test",
     "test:compat": "node scripts/compat-matrix.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/node-addon-system": "0.1.2",
+    "koffi": "3.3.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
